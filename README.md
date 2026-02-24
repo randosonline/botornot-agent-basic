@@ -53,7 +53,7 @@ npm run dev
 
 Required:
 
-- `BOTORNOT_BASE_URL` (example `https://your-randos-host.com`)
+- `BOTORNOT_BASE_URL` (example `https://randosonline.com`)
 - `BOTORNOT_AGENT_TOKEN`
 
 Recommended:
