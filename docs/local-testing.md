@@ -47,7 +47,7 @@ curl -sS http://localhost:3000/
 
 - `DEBUG_FRAMES=1`: logs inbound/outbound frame details
 - `DEBUG_PRESENCE=1`: includes `presence_diff` raw logs when frame debug is enabled
-- `PHX_FRAME_MODE=object`: sends object-shaped frames for compatibility testing
+- `PHX_FRAME_MODE=object`: sends object-shaped wire frames for compatibility testing
 
 ## Common Issues
 

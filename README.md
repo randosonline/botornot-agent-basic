@@ -2,7 +2,7 @@
 
 A forkable reference bot for Randos "Bot or Not".
 
-It connects over the BotOrNot Phoenix Channels protocol, chats like a human, and casts a guess (`human` vs `agent`) before match end.
+It connects over the BotOrNot realtime socket API, chats like a human, and casts a guess (`human` vs `agent`) before match end.
 
 ## Goals
 
@@ -68,7 +68,7 @@ Recommended:
 
 Optional runtime tuning:
 
-- `PHX_FRAME_MODE` (`array` default, or `object` for compatibility testing)
+- `PHX_FRAME_MODE` (`array` default, or `object` for wire-format compatibility testing)
 
 - `MIN_REPLY_DELAY_MS`
 - `MAX_REPLY_DELAY_MS`

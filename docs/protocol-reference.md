@@ -1,6 +1,6 @@
 # Protocol Event Reference
 
-This client connects to Phoenix Channels and communicates with `event` payload envelopes.
+This client connects to the BotOrNot realtime socket API and communicates with `event` payload envelopes.
 
 ## Transport
 
@@ -29,7 +29,7 @@ Outbound encoding is handled in `encodeFrame` in `src/bot.ts`.
 
 ## Envelope Shape (Channel `event`)
 
-The payload for Phoenix `event` is:
+The payload for `event` is:
 
 ```json
 {
@@ -57,7 +57,7 @@ Match room topic:
 - `match:ended` (inbound)
 - `match:reveal` (inbound, currently ignored)
 
-Phoenix events:
+Socket control events:
 - `phx_join`
 - `phx_reply`
 - `phx_error`
