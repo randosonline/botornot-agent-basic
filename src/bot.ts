@@ -20,6 +20,7 @@ type MatchState = {
   transcript: ChatTurn[]
   voted: boolean
   opponentVoted: boolean
+  chatLocked: boolean
   lastSentAt: number
   preReplyMessagesSent: number
 }
@@ -146,6 +147,9 @@ export class BotOrNotAgent {
 
     if (event === "phx_reply") {
       const pending = this.logPhxReply(topic, ref, payload)
+      if (topic === "room:game:botornot:lobby" && pending?.event === "event" && pending.channelType === "match:request") {
+        this.handleMatchRequestReply(payload)
+      }
       if (String((payload as { status?: string }).status ?? "") === "ok" && pending?.event === "phx_join") {
         this.joinedTopics.add(topic)
       }
@@ -205,6 +209,7 @@ export class BotOrNotAgent {
         transcript: [],
         voted: false,
         opponentVoted: false,
+        chatLocked: false,
         lastSentAt: 0,
         preReplyMessagesSent: 0
       }
@@ -215,6 +220,21 @@ export class BotOrNotAgent {
     }
 
     if (!this.match || topic !== this.match.topic) return
+
+    if (type === "vote:phase") {
+      const chatLocked = Boolean(payload.chat_locked)
+      if (chatLocked && !this.match.chatLocked) {
+        this.match.chatLocked = true
+        this.stopProactiveMessages()
+      }
+
+      if (this.hasOpponentVoteSignal(payload.voted_by)) {
+        this.match.opponentVoted = true
+        this.log("vote phase indicates opponent voted; casting best-guess vote")
+        await this.castBestGuessVote()
+      }
+      return
+    }
 
     if (type === "vote:cast" || type === "match:opponent_voted") {
       const from = String(payload.from ?? "")
@@ -339,6 +359,7 @@ export class BotOrNotAgent {
 
   private async sendPlannedChat(body: string, options?: SendChatOptions): Promise<void> {
     if (!this.match) return
+    if (this.match.chatLocked) return
     if (options?.onlyBeforeOpponentReply && this.match.transcript.some(turn => turn.from === "opponent")) return
     const cleaned = body.trim().replace(/\s+/g, " ").slice(0, 260)
     if (!cleaned) return
@@ -492,6 +513,32 @@ export class BotOrNotAgent {
     this.pushEvent(topic, "match:request", {})
   }
 
+  private handleMatchRequestReply(payload: Record<string, unknown>): void {
+    if (String(payload.status ?? "") !== "ok") return
+    const response = payload.response
+    if (typeof response !== "object" || response === null) return
+
+    const responseObj = response as Record<string, unknown>
+    const queueStatus = String(responseObj.status ?? "")
+    if (queueStatus === "queued" || queueStatus === "already_queued") {
+      this.awaitingMatch = true
+      return
+    }
+
+    if (queueStatus === "already_active") {
+      this.awaitingMatch = false
+      const room = String(responseObj.room ?? "")
+      const matchId = String(responseObj.match_id ?? "")
+      if (!room) return
+
+      const alreadyInRoom = this.match?.topic === room || this.joinedTopics.has(room)
+      this.log(`resuming active match${matchId ? ` ${matchId}` : ""}`)
+      if (!alreadyInRoom) {
+        this.joinTopic(room)
+      }
+    }
+  }
+
   private schedulePreReplyMessage(): void {
     if (this.proactiveTimer) return
     if (!this.shouldSendPreReplyMessage()) return
@@ -585,6 +632,13 @@ export class BotOrNotAgent {
       startedAt: this.match.startedAt.toISOString(),
       now: new Date().toISOString()
     }
+  }
+
+  private hasOpponentVoteSignal(votedBy: unknown): boolean {
+    if (Array.isArray(votedBy)) {
+      return votedBy.some(value => String(value) === "opponent")
+    }
+    return String(votedBy ?? "") === "opponent"
   }
 }
 

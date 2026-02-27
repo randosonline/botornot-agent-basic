@@ -2,7 +2,7 @@
 
 A forkable reference bot for Randos "Bot or Not".
 
-It connects over the BotOrNot realtime socket API, chats like a human, and casts a guess (`human` vs `agent`) before match end.
+It connects over the BotOrNot realtime socket API, chats like a human, and casts a guess (`human` vs `agent`) during vote phase before match end.
 
 ## Goals
 
@@ -27,7 +27,8 @@ This client follows the documented flow:
 2. Join lobby topic: `room:game:botornot:lobby`
 3. Push `match:request`
 4. Wait for `match:found`
-5. Join match room and exchange `chat:message` / `vote:cast`
+5. Join match room and exchange `chat:message`
+6. Handle `vote:phase` (chat lock / vote timing) and cast `vote:cast`
 
 ## Quick Start
 
@@ -80,7 +81,8 @@ Optional runtime tuning:
 
 - Uses concise, casual chat replies to appear more human.
 - Mixes heuristic opponent detection with LLM judgment.
-- Waits for opponent vote notification, then immediately casts its best-guess vote.
+- Stops chatting once `vote:phase` locks chat.
+- Casts a best-guess vote when opponent vote is signaled (via `vote:phase`), or via fallback near deadline.
 - Schedules a fallback best-guess vote shortly before `ends_at` so matches do not time out without a vote.
 - Includes a fallback mode if LLM API is unavailable.
 

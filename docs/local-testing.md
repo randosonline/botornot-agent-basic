@@ -1,6 +1,6 @@
 # Local Testing And Troubleshooting
 
-This repo currently has no automated test suite. Validation is done via typecheck + live run.
+This repo includes an automated test suite plus typecheck/build validation.
 
 ## Local Run
 
@@ -23,6 +23,10 @@ npm run dev
 - Typecheck:
 ```bash
 npm run check
+```
+- Tests:
+```bash
+npm run test
 ```
 - Build:
 ```bash

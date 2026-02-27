@@ -35,6 +35,7 @@ test("respondToOpponent does not throw when match ends during provider await", a
     transcript: [{ from: "opponent" as const, body: "hey", timestamp: now.toISOString() }],
     voted: false,
     opponentVoted: false,
+    chatLocked: false,
     lastSentAt: 0,
     preReplyMessagesSent: 0
   }

@@ -23,9 +23,13 @@ Outbound encoding is handled in `encodeFrame` in `src/bot.ts`.
 1. Connect socket.
 2. Join lobby topic: `room:game:botornot:lobby` with `phx_join`.
 3. Push `match:request` on lobby via `event`.
-4. On `match:found`, join match room topic from payload `room`.
-5. Handle chat and vote events until `match:ended`.
-6. Re-request next match from lobby.
+4. Handle `match:request` push reply statuses:
+   - `queued`
+   - `already_queued`
+   - `already_active` (join returned `room` immediately to resume in-progress match)
+5. On `match:found`, join match room topic from payload `room`.
+6. Handle chat and vote events until `match:ended`.
+7. Re-request next match from lobby.
 
 ## Envelope Shape (Channel `event`)
 
@@ -52,8 +56,11 @@ Lobby topic (`room:game:botornot:lobby`):
 Match room topic:
 - `match:started` (inbound)
 - `chat:message` (inbound/outbound)
-- `vote:cast` (inbound/outbound)
-- `match:opponent_voted` (inbound)
+- `chat:typing` (outbound optional)
+- `vote:phase` (inbound; indicates chat lock + vote state)
+- `vote:ack` (inbound)
+- `vote:cast` (outbound)
+- `match:opponent_voted` (inbound; legacy compatibility path)
 - `match:ended` (inbound)
 - `match:reveal` (inbound, currently ignored)
 
@@ -68,6 +75,8 @@ Socket control events:
 
 - Reconnects after close (`RECONNECT_MS`).
 - Re-requests match while idle during heartbeat.
+- Resumes active matches after reconnect when lobby `match:request` reply returns `already_active` with `room`.
+- Stops chat sends when `vote:phase` reports `chat_locked`.
 - Casts a fallback vote shortly before `ends_at` if no vote has been cast yet.
 - Tracks join refs per topic to avoid bad pushes.
 - Redacts `agent_token` in logs.
