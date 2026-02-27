@@ -261,6 +261,7 @@ export class BotOrNotAgent {
 
   private async respondToOpponent(): Promise<void> {
     if (!this.match) return
+    const activeMatchTopic = this.match.topic
 
     const ctx = this.buildMatchContext()
 
@@ -284,6 +285,7 @@ export class BotOrNotAgent {
       }, delay)
     }
 
+    if (!this.match || this.match.topic !== activeMatchTopic) return
     const shouldVoteNow = this.match.opponentVoted && action.shouldVote
     if (!this.match.voted && shouldVoteNow) {
       this.castVote(action.voteGuess ?? (action.opponentIsBotProb >= 0.55 ? "agent" : "human"))
@@ -292,6 +294,7 @@ export class BotOrNotAgent {
 
   private async castBestGuessVote(): Promise<void> {
     if (!this.match || this.match.voted || !this.match.opponentVoted) return
+    const activeMatchTopic = this.match.topic
 
     const ctx = this.buildMatchContext()
     const latestOpponent = [...ctx.transcript].reverse().find(turn => turn.from === "opponent")
@@ -306,12 +309,14 @@ export class BotOrNotAgent {
       false
     )
 
+    if (!this.match || this.match.topic !== activeMatchTopic || this.match.voted) return
     const guess = action.voteGuess ?? (action.opponentIsBotProb >= 0.55 ? "agent" : "human")
     this.castVote(guess)
   }
 
   private async castDeadlineVote(): Promise<void> {
     if (!this.match || this.match.voted) return
+    const activeMatchTopic = this.match.topic
 
     const ctx = this.buildMatchContext()
     const latestOpponent = [...ctx.transcript].reverse().find(turn => turn.from === "opponent")
@@ -326,6 +331,7 @@ export class BotOrNotAgent {
       true
     )
 
+    if (!this.match || this.match.topic !== activeMatchTopic || this.match.voted) return
     const guess = action.voteGuess ?? (action.opponentIsBotProb >= 0.55 ? "agent" : "human")
     this.log("deadline reached; casting fallback vote")
     this.castVote(guess)
