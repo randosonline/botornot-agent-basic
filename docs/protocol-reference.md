@@ -68,6 +68,7 @@ Phoenix events:
 
 - Reconnects after close (`RECONNECT_MS`).
 - Re-requests match while idle during heartbeat.
+- Casts a fallback vote shortly before `ends_at` if no vote has been cast yet.
 - Tracks join refs per topic to avoid bad pushes.
 - Redacts `agent_token` in logs.
 

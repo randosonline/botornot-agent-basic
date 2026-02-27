@@ -81,6 +81,7 @@ Optional runtime tuning:
 - Uses concise, casual chat replies to appear more human.
 - Mixes heuristic opponent detection with LLM judgment.
 - Waits for opponent vote notification, then immediately casts its best-guess vote.
+- Schedules a fallback best-guess vote shortly before `ends_at` so matches do not time out without a vote.
 - Includes a fallback mode if LLM API is unavailable.
 
 ## Deployment

@@ -57,6 +57,7 @@ export class BotOrNotAgent {
   private heartbeatTimer: NodeJS.Timeout | null = null
   private reconnectTimer: NodeJS.Timeout | null = null
   private proactiveTimer: NodeJS.Timeout | null = null
+  private voteDeadlineTimer: NodeJS.Timeout | null = null
   private match: MatchState | null = null
   private readonly debugFrames = process.env.DEBUG_FRAMES === "1"
   private readonly debugPresence = process.env.DEBUG_PRESENCE === "1"
@@ -99,6 +100,7 @@ export class BotOrNotAgent {
       this.log(`socket closed${suffix}, reconnect in ${this.config.reconnectMs}ms`)
       this.stopHeartbeat()
       this.stopProactiveMessages()
+      this.stopVoteDeadlineTimer()
       this.match = null
       this.awaitingMatch = false
       this.lastMatchRequestAt = 0
@@ -179,6 +181,7 @@ export class BotOrNotAgent {
         if (!room || !matchId) return
         const alreadyInRoom = this.match?.topic === room || this.joinedTopics.has(room)
         this.stopProactiveMessages()
+        this.stopVoteDeadlineTimer()
         this.match = null
         this.awaitingMatch = false
         this.log(`match found ${matchId}`)
@@ -207,6 +210,7 @@ export class BotOrNotAgent {
       }
       this.log(`match started ${matchId}`)
       this.schedulePreReplyMessage()
+      this.scheduleVoteBeforeDeadline()
       return
     }
 
@@ -242,6 +246,7 @@ export class BotOrNotAgent {
     if (type === "match:ended") {
       this.log("match ended; queueing next request")
       this.stopProactiveMessages()
+      this.stopVoteDeadlineTimer()
       this.match = null
       setTimeout(() => {
         this.requestMatch("room:game:botornot:lobby")
@@ -305,6 +310,27 @@ export class BotOrNotAgent {
     this.castVote(guess)
   }
 
+  private async castDeadlineVote(): Promise<void> {
+    if (!this.match || this.match.voted) return
+
+    const ctx = this.buildMatchContext()
+    const latestOpponent = [...ctx.transcript].reverse().find(turn => turn.from === "opponent")
+    const textSuspicion = latestOpponent ? heuristicSuspicionFromText(latestOpponent.body) : 0.35
+    const action = await chooseAction(
+      this.provider,
+      {
+        agentName: this.config.agentName,
+        context: ctx,
+        suspicionScore: textSuspicion
+      },
+      true
+    )
+
+    const guess = action.voteGuess ?? (action.opponentIsBotProb >= 0.55 ? "agent" : "human")
+    this.log("deadline reached; casting fallback vote")
+    this.castVote(guess)
+  }
+
   private async sendPlannedChat(body: string, options?: SendChatOptions): Promise<void> {
     if (!this.match) return
     if (options?.onlyBeforeOpponentReply && this.match.transcript.some(turn => turn.from === "opponent")) return
@@ -328,6 +354,7 @@ export class BotOrNotAgent {
   private castVote(guess: "human" | "agent"): void {
     if (!this.match || this.match.voted) return
     this.match.voted = true
+    this.stopVoteDeadlineTimer()
     this.log(`vote cast -> ${guess}`)
     this.pushEvent(this.match.topic, "vote:cast", { guess })
   }
@@ -400,6 +427,11 @@ export class BotOrNotAgent {
     this.proactiveTimer = null
   }
 
+  private stopVoteDeadlineTimer(): void {
+    if (this.voteDeadlineTimer) clearTimeout(this.voteDeadlineTimer)
+    this.voteDeadlineTimer = null
+  }
+
   private send(frame: OutboundFrame): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return
     const encoded = this.encodeFrame(frame)
@@ -469,6 +501,20 @@ export class BotOrNotAgent {
       if (this.shouldSendPreReplyMessage()) {
         this.schedulePreReplyMessage()
       }
+    }, delay)
+  }
+
+  private scheduleVoteBeforeDeadline(): void {
+    this.stopVoteDeadlineTimer()
+    if (!this.match) return
+
+    const voteLeadMs = randomInt(6000, 10000)
+    const msUntilVote = this.match.endsAt.getTime() - Date.now() - voteLeadMs
+    const delay = Math.max(1200, msUntilVote)
+
+    this.voteDeadlineTimer = setTimeout(() => {
+      this.voteDeadlineTimer = null
+      void this.castDeadlineVote()
     }, delay)
   }
 
