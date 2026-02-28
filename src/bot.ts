@@ -19,7 +19,10 @@ type MatchState = {
   durationSec: number
   transcript: ChatTurn[]
   voted: boolean
+  voteInFlight: boolean
+  pendingVoteGuess: "human" | "agent" | null
   opponentVoted: boolean
+  mustVote: boolean
   chatLocked: boolean
   lastSentAt: number
   preReplyMessagesSent: number
@@ -150,6 +153,9 @@ export class BotOrNotAgent {
       if (topic === "room:game:botornot:lobby" && pending?.event === "event" && pending.channelType === "match:request") {
         this.handleMatchRequestReply(payload)
       }
+      if (pending?.event === "event" && pending.channelType === "vote:cast") {
+        this.handleVoteCastReply(payload)
+      }
       if (String((payload as { status?: string }).status ?? "") === "ok" && pending?.event === "phx_join") {
         this.joinedTopics.add(topic)
       }
@@ -208,7 +214,10 @@ export class BotOrNotAgent {
         durationSec,
         transcript: [],
         voted: false,
+        voteInFlight: false,
+        pendingVoteGuess: null,
         opponentVoted: false,
+        mustVote: false,
         chatLocked: false,
         lastSentAt: 0,
         preReplyMessagesSent: 0
@@ -228,9 +237,23 @@ export class BotOrNotAgent {
         this.stopProactiveMessages()
       }
 
+      if (Boolean(payload.must_vote)) {
+        this.match.mustVote = true
+      }
+
       if (this.hasOpponentVoteSignal(payload.voted_by)) {
         this.match.opponentVoted = true
-        this.log("vote phase indicates opponent voted; casting best-guess vote")
+      }
+
+      if (this.match.mustVote) {
+        if (this.match.pendingVoteGuess) {
+          this.flushPendingVote()
+        } else if (!this.match.voted) {
+          this.log("vote phase requires vote; casting best-guess vote")
+          await this.castBestGuessVote()
+        }
+      } else if (this.match.opponentVoted && !this.match.voted && !this.match.pendingVoteGuess) {
+        this.log("vote phase indicates opponent voted; preparing best-guess vote")
         await this.castBestGuessVote()
       }
       return
@@ -242,9 +265,16 @@ export class BotOrNotAgent {
 
       if (isOpponentVote) {
         this.match.opponentVoted = true
-        this.log("opponent vote observed; casting best-guess vote")
-        await this.castBestGuessVote()
+        if (this.match.mustVote) {
+          this.log("opponent vote observed; casting best-guess vote")
+          await this.castBestGuessVote()
+        }
       }
+      return
+    }
+
+    if (type === "vote:ack") {
+      this.handleVoteAccepted()
       return
     }
 
@@ -308,12 +338,12 @@ export class BotOrNotAgent {
     if (!this.match || this.match.topic !== activeMatchTopic) return
     const shouldVoteNow = this.match.opponentVoted && action.shouldVote
     if (!this.match.voted && shouldVoteNow) {
-      this.castVote(action.voteGuess ?? (action.opponentIsBotProb >= 0.55 ? "agent" : "human"))
+      this.queueVote(action.voteGuess ?? (action.opponentIsBotProb >= 0.55 ? "agent" : "human"))
     }
   }
 
   private async castBestGuessVote(): Promise<void> {
-    if (!this.match || this.match.voted || !this.match.opponentVoted) return
+    if (!this.match || this.match.voted) return
     const activeMatchTopic = this.match.topic
 
     const ctx = this.buildMatchContext()
@@ -331,7 +361,7 @@ export class BotOrNotAgent {
 
     if (!this.match || this.match.topic !== activeMatchTopic || this.match.voted) return
     const guess = action.voteGuess ?? (action.opponentIsBotProb >= 0.55 ? "agent" : "human")
-    this.castVote(guess)
+    this.queueVote(guess)
   }
 
   private async castDeadlineVote(): Promise<void> {
@@ -354,7 +384,7 @@ export class BotOrNotAgent {
     if (!this.match || this.match.topic !== activeMatchTopic || this.match.voted) return
     const guess = action.voteGuess ?? (action.opponentIsBotProb >= 0.55 ? "agent" : "human")
     this.log("deadline reached; casting fallback vote")
-    this.castVote(guess)
+    this.queueVote(guess)
   }
 
   private async sendPlannedChat(body: string, options?: SendChatOptions): Promise<void> {
@@ -378,12 +408,50 @@ export class BotOrNotAgent {
     this.match.lastSentAt = Date.now()
   }
 
-  private castVote(guess: "human" | "agent"): void {
+  private queueVote(guess: "human" | "agent"): void {
+    if (!this.match || this.match.voted) return
+    this.match.pendingVoteGuess = guess
+    if (this.match.mustVote) {
+      this.flushPendingVote()
+      return
+    }
+    this.log(`vote pending until must_vote=true (guess=${guess})`)
+  }
+
+  private flushPendingVote(): void {
+    if (!this.match || this.match.voted || this.match.voteInFlight) return
+    const guess = this.match.pendingVoteGuess
+    if (!guess) return
+
+    const sent = this.pushEvent(this.match.topic, "vote:cast", { guess })
+    if (!sent) {
+      this.log("vote send deferred; socket not ready")
+      return
+    }
+    this.match.voteInFlight = true
+    this.log(`vote cast -> ${guess}`)
+  }
+
+  private handleVoteAccepted(): void {
     if (!this.match || this.match.voted) return
     this.match.voted = true
+    this.match.voteInFlight = false
+    this.match.pendingVoteGuess = null
     this.stopVoteDeadlineTimer()
-    this.log(`vote cast -> ${guess}`)
-    this.pushEvent(this.match.topic, "vote:cast", { guess })
+  }
+
+  private handleVoteCastReply(payload: Record<string, unknown>): void {
+    if (!this.match || this.match.voted) return
+    const status = String(payload.status ?? "")
+    if (status === "ok") {
+      this.handleVoteAccepted()
+      return
+    }
+
+    this.match.voteInFlight = false
+    const reason = String((payload.response as { reason?: string } | undefined)?.reason ?? "")
+    const details = reason ? ` reason=${reason}` : ""
+    this.log(`vote cast rejected status=${status}${details}`)
   }
 
   private joinTopic(topic: string): void {
@@ -408,13 +476,13 @@ export class BotOrNotAgent {
     })
   }
 
-  private pushEvent(topic: string, type: string, payload: Record<string, unknown>): void {
+  private pushEvent(topic: string, type: string, payload: Record<string, unknown>): boolean {
     const joinRef = this.topicJoinRefs.get(topic)
     if (!joinRef) {
       this.log(`skip push topic=${topic} type=${type}; missing join_ref`)
-      return
+      return false
     }
-    this.send({
+    return this.send({
       topic,
       event: "event",
       payload: { type, payload },
@@ -459,8 +527,8 @@ export class BotOrNotAgent {
     this.voteDeadlineTimer = null
   }
 
-  private send(frame: OutboundFrame): void {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return
+  private send(frame: OutboundFrame): boolean {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return false
     const encoded = this.encodeFrame(frame)
     const channelType =
       frame.event === "event" && typeof frame.payload.type === "string" ? String(frame.payload.type) : undefined
@@ -476,6 +544,7 @@ export class BotOrNotAgent {
       )
     }
     this.ws.send(JSON.stringify(encoded))
+    return true
   }
 
   private nextRef(): string {

@@ -50,3 +50,70 @@ test("respondToOpponent does not throw when match ends during provider await", a
     await (agent as unknown as { respondToOpponent: () => Promise<void> }).respondToOpponent()
   })
 })
+
+test("queued vote is sent on must_vote and confirmed on vote:ack", async () => {
+  const config: BotConfig = {
+    baseUrl: "https://randosonline.com",
+    agentToken: "test-token",
+    agentName: "vote-test-bot",
+    llmProvider: "openai",
+    llmModel: "gpt-4o-mini",
+    reconnectMs: 50,
+    minReplyDelayMs: 0,
+    maxReplyDelayMs: 0,
+    minGapBetweenMessagesMs: 0,
+    maxPreReplyMessages: 0
+  }
+
+  const agent = new BotOrNotAgent(config, null)
+  const now = new Date()
+  const activeMatch = {
+    topic: "room:game:botornot:test-match",
+    matchId: "test-match",
+    startedAt: now,
+    endsAt: new Date(now.getTime() + 60_000),
+    durationSec: 60,
+    transcript: [] as Array<{ from: "self" | "opponent"; body: string; timestamp: string }>,
+    voted: false,
+    voteInFlight: false,
+    pendingVoteGuess: null as "human" | "agent" | null,
+    opponentVoted: false,
+    mustVote: false,
+    chatLocked: false,
+    lastSentAt: 0,
+    preReplyMessagesSent: 0
+  }
+
+  const sentVotes: Array<{ guess: string }> = []
+  ;(agent as unknown as { pushEvent: (topic: string, type: string, payload: { guess: string }) => boolean }).pushEvent = (
+    _topic: string,
+    type: string,
+    payload: { guess: string }
+  ) => {
+    if (type === "vote:cast") sentVotes.push(payload)
+    return true
+  }
+
+  ;(agent as unknown as { match: typeof activeMatch | null }).match = activeMatch
+  ;(agent as unknown as { queueVote: (guess: "human" | "agent") => void }).queueVote("human")
+  assert.equal(activeMatch.pendingVoteGuess, "human")
+  assert.equal(activeMatch.voteInFlight, false)
+  assert.equal(sentVotes.length, 0)
+
+  await (agent as unknown as {
+    handleEnvelope: (topic: string, payload: { type: string; payload: { must_vote: boolean } }) => Promise<void>
+  }).handleEnvelope(activeMatch.topic, { type: "vote:phase", payload: { must_vote: true } })
+
+  assert.equal(activeMatch.mustVote, true)
+  assert.equal(activeMatch.voteInFlight, true)
+  assert.equal(sentVotes.length, 1)
+  assert.equal(sentVotes[0]?.guess, "human")
+
+  await (agent as unknown as {
+    handleEnvelope: (topic: string, payload: { type: string; payload: Record<string, unknown> }) => Promise<void>
+  }).handleEnvelope(activeMatch.topic, { type: "vote:ack", payload: {} })
+
+  assert.equal(activeMatch.voted, true)
+  assert.equal(activeMatch.voteInFlight, false)
+  assert.equal(activeMatch.pendingVoteGuess, null)
+})
