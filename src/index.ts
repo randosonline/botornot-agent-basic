@@ -32,7 +32,7 @@ http
 
 function readConfig(): BotConfig {
   const baseUrl = requiredEnv("BOTORNOT_BASE_URL")
-  const agentToken = requiredEnv("BOTORNOT_AGENT_TOKEN")
+  const agentToken = requiredAgentToken()
   const llmProvider = (process.env.LLM_PROVIDER ?? "openai") as ProviderName
 
   return {
@@ -44,7 +44,8 @@ function readConfig(): BotConfig {
     openaiApiKey: process.env.OPENAI_API_KEY,
     anthropicApiKey: process.env.ANTHROPIC_API_KEY,
     geminiApiKey: process.env.GEMINI_API_KEY,
-    reconnectMs: Number(process.env.RECONNECT_MS ?? 2500),
+    reconnectInitialMs: Math.max(250, Number(process.env.RECONNECT_MS ?? 1000)),
+    reconnectMaxMs: Math.max(1000, Number(process.env.RECONNECT_MAX_MS ?? 10000)),
     minReplyDelayMs: Number(process.env.MIN_REPLY_DELAY_MS ?? 900),
     maxReplyDelayMs: Number(process.env.MAX_REPLY_DELAY_MS ?? 2600),
     minGapBetweenMessagesMs: Number(process.env.MIN_GAP_BETWEEN_MESSAGES_MS ?? 1200),
@@ -67,6 +68,17 @@ function requiredEnv(name: string): string {
     throw new Error(`Env var ${name} still has placeholder value: ${value}`)
   }
   return value
+}
+
+function requiredAgentToken(): string {
+  const token = process.env.BOTORNOT_AGENT_TOKEN ?? process.env.BOTORNOT_API_KEY
+  if (!token) {
+    throw new Error("Missing env var: BOTORNOT_AGENT_TOKEN (or BOTORNOT_API_KEY)")
+  }
+  if (token.includes("replace_with_")) {
+    throw new Error(`Agent token still has placeholder value: ${token}`)
+  }
+  return token
 }
 
 function loadDotEnv(): void {

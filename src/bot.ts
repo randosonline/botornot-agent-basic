@@ -26,6 +26,9 @@ type MatchState = {
   chatLocked: boolean
   lastSentAt: number
   preReplyMessagesSent: number
+  typingOn: boolean
+  chatTokens: number
+  lastTokenRefillAt: number
 }
 
 type OutboundFrame = {
@@ -69,6 +72,9 @@ export class BotOrNotAgent {
   private readonly topicJoinRefs = new Map<string, string>()
   private readonly joinedTopics = new Set<string>()
   private readonly pendingPushes = new Map<string, PendingPush>()
+  private readonly chatBurstLimit = 3
+  private readonly chatRefillPerSec = 1
+  private reconnectAttempt = 0
   private awaitingMatch = false
   private lastMatchRequestAt = 0
 
@@ -88,6 +94,7 @@ export class BotOrNotAgent {
 
     this.ws.on("open", () => {
       this.log("connected")
+      this.reconnectAttempt = 0
       this.startHeartbeat()
       this.joinTopic("room:game:botornot:lobby")
     })
@@ -101,17 +108,19 @@ export class BotOrNotAgent {
     this.ws.on("close", (code, reasonBuffer) => {
       const reason = reasonBuffer.toString("utf8")
       const suffix = reason ? ` (${code}: ${reason})` : ` (${code})`
-      this.log(`socket closed${suffix}, reconnect in ${this.config.reconnectMs}ms`)
+      const reconnectInMs = this.nextReconnectDelayMs()
+      this.log(`socket closed${suffix}, reconnect in ${reconnectInMs}ms`)
       this.stopHeartbeat()
       this.stopProactiveMessages()
       this.stopVoteDeadlineTimer()
+      this.stopTyping()
       this.match = null
       this.awaitingMatch = false
       this.lastMatchRequestAt = 0
       this.topicJoinRefs.clear()
       this.joinedTopics.clear()
       this.pendingPushes.clear()
-      this.scheduleReconnect()
+      this.scheduleReconnect(reconnectInMs)
     })
 
     this.ws.on("error", error => {
@@ -120,9 +129,9 @@ export class BotOrNotAgent {
     })
   }
 
-  private scheduleReconnect(): void {
+  private scheduleReconnect(delayMs: number): void {
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
-    this.reconnectTimer = setTimeout(() => this.connect(), this.config.reconnectMs)
+    this.reconnectTimer = setTimeout(() => this.connect(), delayMs)
   }
 
   private async handleRawFrame(frame: string): Promise<void> {
@@ -192,6 +201,7 @@ export class BotOrNotAgent {
         const alreadyInRoom = this.match?.topic === room || this.joinedTopics.has(room)
         this.stopProactiveMessages()
         this.stopVoteDeadlineTimer()
+        this.stopTyping()
         this.match = null
         this.awaitingMatch = false
         this.log(`match found ${matchId}`)
@@ -220,7 +230,10 @@ export class BotOrNotAgent {
         mustVote: false,
         chatLocked: false,
         lastSentAt: 0,
-        preReplyMessagesSent: 0
+        preReplyMessagesSent: 0,
+        typingOn: false,
+        chatTokens: this.chatBurstLimit,
+        lastTokenRefillAt: Date.now()
       }
       this.log(`match started ${matchId}`)
       this.schedulePreReplyMessage()
@@ -235,6 +248,7 @@ export class BotOrNotAgent {
       if (chatLocked && !this.match.chatLocked) {
         this.match.chatLocked = true
         this.stopProactiveMessages()
+        this.stopTyping()
       }
 
       if (Boolean(payload.must_vote)) {
@@ -297,6 +311,7 @@ export class BotOrNotAgent {
       this.log("match ended; queueing next request")
       this.stopProactiveMessages()
       this.stopVoteDeadlineTimer()
+      this.stopTyping()
       this.match = null
       setTimeout(() => {
         this.requestMatch("room:game:botornot:lobby")
@@ -330,6 +345,7 @@ export class BotOrNotAgent {
 
     if (action.reply) {
       const delay = randomInt(this.config.minReplyDelayMs, this.config.maxReplyDelayMs)
+      this.maybeStartTyping(delay)
       setTimeout(() => {
         void this.sendPlannedChat(action.reply ?? "")
       }, delay)
@@ -389,12 +405,30 @@ export class BotOrNotAgent {
 
   private async sendPlannedChat(body: string, options?: SendChatOptions): Promise<void> {
     if (!this.match) return
-    if (this.match.chatLocked) return
-    if (options?.onlyBeforeOpponentReply && this.match.transcript.some(turn => turn.from === "opponent")) return
+    if (this.match.chatLocked) {
+      this.stopTyping()
+      return
+    }
+    if (options?.onlyBeforeOpponentReply && this.match.transcript.some(turn => turn.from === "opponent")) {
+      this.stopTyping()
+      return
+    }
     const cleaned = body.trim().replace(/\s+/g, " ").slice(0, 260)
-    if (!cleaned) return
+    if (!cleaned) {
+      this.stopTyping()
+      return
+    }
 
     const now = Date.now()
+    this.refillChatTokens(now)
+    if (this.match.chatTokens < 1) {
+      const wait = Math.max(350, Math.ceil(1000 / this.chatRefillPerSec) + randomInt(40, 180))
+      setTimeout(() => {
+        void this.sendPlannedChat(cleaned, options)
+      }, wait)
+      return
+    }
+
     const diff = now - this.match.lastSentAt
     if (diff < this.config.minGapBetweenMessagesMs) {
       const wait = this.config.minGapBetweenMessagesMs - diff + randomInt(120, 380)
@@ -404,8 +438,14 @@ export class BotOrNotAgent {
       return
     }
 
-    this.pushEvent(this.match.topic, "chat:message", { body: cleaned })
+    const sent = this.pushEvent(this.match.topic, "chat:message", { body: cleaned })
+    if (!sent) {
+      this.stopTyping()
+      return
+    }
+    this.match.chatTokens = Math.max(0, this.match.chatTokens - 1)
     this.match.lastSentAt = Date.now()
+    this.stopTyping()
   }
 
   private queueVote(guess: "human" | "agent"): void {
@@ -556,7 +596,8 @@ export class BotOrNotAgent {
   private buildSocketUrl(): string {
     const url = new URL(this.config.baseUrl)
     const wsProtocol = url.protocol === "https:" ? "wss:" : "ws:"
-    return `${wsProtocol}//${url.host}/socket/websocket?vsn=2.0.0&agent_token=${encodeURIComponent(this.config.agentToken)}`
+    const token = encodeURIComponent(this.config.agentToken)
+    return `${wsProtocol}//${url.host}/socket/websocket?vsn=2.0.0&agent_token=${token}&api_key=${token}`
   }
 
   private log(msg: string): void {
@@ -564,7 +605,7 @@ export class BotOrNotAgent {
   }
 
   private redactSecrets(text: string): string {
-    let redacted = text.replace(/(agent_token=)[^&\s]+/gi, "$1[REDACTED]")
+    let redacted = text.replace(/(agent_token=|api_key=)[^&\s]+/gi, "$1[REDACTED]")
     if (this.config.agentToken) {
       redacted = redacted.split(this.config.agentToken).join("[REDACTED]")
     }
@@ -613,6 +654,7 @@ export class BotOrNotAgent {
     if (!this.shouldSendPreReplyMessage()) return
 
     const delay = randomInt(this.config.minReplyDelayMs, this.config.maxReplyDelayMs)
+    this.maybeStartTyping(delay)
     this.proactiveTimer = setTimeout(() => {
       this.proactiveTimer = null
       if (!this.match || !this.shouldSendPreReplyMessage()) return
@@ -708,6 +750,40 @@ export class BotOrNotAgent {
       return votedBy.some(value => String(value) === "opponent")
     }
     return String(votedBy ?? "") === "opponent"
+  }
+
+  private nextReconnectDelayMs(): number {
+    const multiplier = 2 ** this.reconnectAttempt
+    this.reconnectAttempt += 1
+    return Math.min(this.config.reconnectMaxMs, this.config.reconnectInitialMs * multiplier)
+  }
+
+  private refillChatTokens(now: number): void {
+    if (!this.match) return
+    const elapsedMs = now - this.match.lastTokenRefillAt
+    if (elapsedMs <= 0) return
+
+    const refillAmount = (elapsedMs / 1000) * this.chatRefillPerSec
+    this.match.chatTokens = Math.min(this.chatBurstLimit, this.match.chatTokens + refillAmount)
+    this.match.lastTokenRefillAt = now
+  }
+
+  private maybeStartTyping(delayMs: number): void {
+    if (!this.match) return
+    if (this.match.chatLocked || this.match.typingOn) return
+    if (delayMs < 300) return
+    if (Math.random() > 0.75) return
+
+    const sent = this.pushEvent(this.match.topic, "chat:typing", { typing: true })
+    if (sent) {
+      this.match.typingOn = true
+    }
+  }
+
+  private stopTyping(): void {
+    if (!this.match || !this.match.typingOn) return
+    this.pushEvent(this.match.topic, "chat:typing", { typing: false })
+    this.match.typingOn = false
   }
 }
 

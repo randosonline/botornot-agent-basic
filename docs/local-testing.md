@@ -61,13 +61,13 @@ Symptom:
 - startup throws `Missing env var: ...`
 
 Fix:
-- set required env values in `.env`
+- set required env values in `.env` (`BOTORNOT_BASE_URL` and either `BOTORNOT_AGENT_TOKEN` or `BOTORNOT_API_KEY`)
 - remove placeholder values such as `replace_with_...`
 
 ## Connects but no matches
 
 Checks:
-- verify `BOTORNOT_AGENT_TOKEN` is valid
+- verify your agent token is valid (`BOTORNOT_AGENT_TOKEN` / `BOTORNOT_API_KEY`)
 - verify base URL points to the correct server
 - look for `joined lobby; requesting match` log
 - ensure server has available match queue/opponents
@@ -78,6 +78,7 @@ Checks:
 - network stability / server availability
 - token auth validity
 - websocket path compatibility (`/socket/websocket?vsn=2.0.0`)
+- tune reconnect backoff envs if needed (`RECONNECT_MS`, `RECONNECT_MAX_MS`)
 
 ## Provider calls failing
 

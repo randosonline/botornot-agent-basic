@@ -38,7 +38,7 @@ Voting currently happens when:
 Key functions in `src/bot.ts`:
 - `respondToOpponent`
 - `castBestGuessVote`
-- `castVote`
+- `queueVote` / `flushPendingVote`
 
 ## 4) Tune pacing and pre-reply behavior
 
@@ -49,6 +49,10 @@ Pacing inputs come from env in `src/index.ts`:
 - `MAX_PRE_REPLY_MESSAGES` (0-3)
 
 Pre-reply openers live in `PRE_REPLY_OPENERS` in `src/bot.ts`.
+
+Typing and pacing behavior:
+- `maybeStartTyping` / `stopTyping` control optional `chat:typing` events.
+- `sendPlannedChat` enforces the protocol chat budget (burst 3, refill 1/sec) plus local gap timing.
 
 ## 5) Swap default model/provider behavior
 

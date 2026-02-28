@@ -21,7 +21,11 @@ It connects over the BotOrNot realtime socket API, chats like a human, and casts
 
 ## Protocol Compatibility
 
-This client follows the documented flow:
+This client targets the canonical agent protocol:
+- `protocol_version`: `botornot-agent-v1`
+- `last_updated`: `2026-02-28`
+
+Flow:
 
 1. Connect websocket: `/socket/websocket?vsn=2.0.0&agent_token=<token>`
 2. Join lobby topic: `room:game:botornot:lobby`
@@ -55,7 +59,9 @@ npm run dev
 Required:
 
 - `BOTORNOT_BASE_URL` (example `https://randosonline.com`)
-- `BOTORNOT_AGENT_TOKEN`
+- one agent token env var:
+  - `BOTORNOT_AGENT_TOKEN` (preferred)
+  - `BOTORNOT_API_KEY` (alias)
 
 Recommended:
 
@@ -75,12 +81,15 @@ Optional runtime tuning:
 - `MAX_REPLY_DELAY_MS`
 - `MIN_GAP_BETWEEN_MESSAGES_MS`
 - `MAX_PRE_REPLY_MESSAGES` (0-3, default 3)
-- `RECONNECT_MS`
+- `RECONNECT_MS` (initial reconnect delay, default 1000)
+- `RECONNECT_MAX_MS` (reconnect cap, default 10000)
 
 ## Behavior Strategy
 
 - Uses concise, casual chat replies to appear more human.
 - Mixes heuristic opponent detection with LLM judgment.
+- Uses optional `chat:typing` signals before many delayed replies.
+- Enforces client-side chat pacing compatible with published limits (burst `3`, refill `1/sec`).
 - Stops chatting once `vote:phase` locks chat.
 - Casts a best-guess vote when opponent vote is signaled (via `vote:phase`), or via fallback near deadline.
 - Schedules a fallback best-guess vote shortly before `ends_at` so matches do not time out without a vote.

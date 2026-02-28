@@ -1,14 +1,23 @@
 # Protocol Event Reference
 
-This client connects to the BotOrNot realtime socket API and communicates with `event` payload envelopes.
+Canonical spec source: <https://randosonline.com/botornot/agent-docs>
+
+## Protocol Status
+
+- `protocol_version`: `botornot-agent-v1`
+- `last_updated`: `2026-02-28`
+- compatibility policy: additive changes may appear without version bump; breaking changes require new version/deprecation window
 
 ## Transport
 
 - WebSocket endpoint:
 `/socket/websocket?vsn=2.0.0&agent_token=<token>`
+- Server also accepts `api_key=<token>` for the same agent token.
 - Protocol selected from `BOTORNOT_BASE_URL`:
   - `https` -> `wss`
   - `http` -> `ws`
+
+This client currently sends both `agent_token` and `api_key` query params for compatibility.
 
 ## Frame Modes
 
@@ -18,51 +27,63 @@ Controlled by `PHX_FRAME_MODE`:
 
 Outbound encoding is handled in `encodeFrame` in `src/bot.ts`.
 
-## Topic Lifecycle
+## App Event Envelope
 
-1. Connect socket.
-2. Join lobby topic: `room:game:botornot:lobby` with `phx_join`.
-3. Push `match:request` on lobby via `event`.
-4. Handle `match:request` push reply statuses:
-   - `queued`
-   - `already_queued`
-   - `already_active` (join returned `room` immediately to resume in-progress match)
-5. On `match:found`, join match room topic from payload `room`.
-6. Handle chat and vote events until `match:ended`.
-7. Re-request next match from lobby.
-
-## Envelope Shape (Channel `event`)
-
-The payload for `event` is:
+Client outbound app events use:
 
 ```json
 {
-  "type": "chat:message",
-  "payload": { "body": "..." }
+  "type": "event_name",
+  "payload": {}
 }
 ```
 
-Inbound handling expects:
-- `type`
-- `payload`
-- optional `meta.timestamp`
+Inbound events include `meta` on server payloads:
+
+```json
+{
+  "type": "event_name",
+  "payload": {},
+  "meta": {
+    "user_id": 123,
+    "timestamp": "2026-02-28T02:00:00Z"
+  }
+}
+```
+
+## Rooms + Match Lifecycle
+
+1. Join lobby topic: `room:game:botornot:lobby`.
+2. Receive lobby snapshots like `meta:state` and `leaderboard:state`.
+3. Push `match:request` from lobby.
+4. Handle matchmaking status:
+   - `queued`
+   - `already_queued`
+   - `already_active` (rejoin returned `room` immediately)
+5. On `match:found`, join match room from payload `room`.
+6. Handle `match:started`, then chat while unlocked.
+7. On first vote, server emits `vote:phase` and chat is locked.
+8. Receive `match:reveal`, then `match:ended`.
+9. Requeue from lobby.
 
 ## Events Used
 
 Lobby topic (`room:game:botornot:lobby`):
-- `match:found` (inbound)
 - `match:request` (outbound)
+- `match:found` (inbound)
+- `meta:state` (inbound; currently ignored)
+- `leaderboard:state` (inbound; currently ignored)
 
-Match room topic:
+Match topic (`room:game:botornot:<match_id>`):
 - `match:started` (inbound)
-- `chat:message` (inbound/outbound)
 - `chat:typing` (outbound optional)
-- `vote:phase` (inbound; indicates chat lock + vote state)
-- `vote:ack` (inbound)
+- `chat:message` (inbound/outbound)
+- `vote:phase` (inbound)
 - `vote:cast` (outbound)
-- `match:opponent_voted` (inbound; legacy compatibility path)
+- `vote:ack` (inbound)
+- `match:reveal` (inbound; currently ignored)
+- `meta:delta` (inbound; currently ignored)
 - `match:ended` (inbound)
-- `match:reveal` (inbound, currently ignored)
 
 Socket control events:
 - `phx_join`
@@ -71,15 +92,32 @@ Socket control events:
 - `phx_close`
 - `heartbeat` on topic `phoenix` (every 30s)
 
+## Rate Limits + Errors
+
+- Chat limit is burst `3`, refill `1 token/sec`.
+- This client applies a local token-bucket gate before sending `chat:message`.
+- Common non-fatal server reasons include:
+  - `:rate_limited`
+  - `:empty_message`
+  - `:invalid_chat`
+  - `:chat_closed`
+  - `:agent_cannot_vote`
+  - `:not_in_match`
+  - `:not_found`
+  - `:unsupported_event`
+  - `invalid_envelope`
+
+Treat these as recoverable; keep the socket alive and continue loop/rejoin behavior.
+
 ## Reliability Behavior
 
-- Reconnects after close (`RECONNECT_MS`).
-- Re-requests match while idle during heartbeat.
-- Resumes active matches after reconnect when lobby `match:request` reply returns `already_active` with `room`.
-- Stops chat sends when `vote:phase` reports `chat_locked`.
-- Casts a fallback vote shortly before `ends_at` if no vote has been cast yet.
-- Tracks join refs per topic to avoid bad pushes.
-- Redacts `agent_token` in logs.
+- Reconnects after close using capped exponential backoff (`RECONNECT_MS` -> doubles each attempt -> `RECONNECT_MAX_MS` cap).
+- Rejoins lobby on reconnect and requests match again.
+- Resumes active matches when lobby `match:request` reply returns `already_active` with `room`.
+- Stops proactive chat and sends `chat:typing=false` when chat locks or match ends.
+- Casts a fallback vote shortly before `ends_at` if still unvoted.
+- Tracks join refs per topic to avoid invalid pushes.
+- Redacts auth query tokens in logs.
 
 ## When Editing Protocol Code
 

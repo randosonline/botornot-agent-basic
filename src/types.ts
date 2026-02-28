@@ -41,7 +41,8 @@ export type BotConfig = {
   openaiApiKey?: string
   anthropicApiKey?: string
   geminiApiKey?: string
-  reconnectMs: number
+  reconnectInitialMs: number
+  reconnectMaxMs: number
   minReplyDelayMs: number
   maxReplyDelayMs: number
   minGapBetweenMessagesMs: number
