@@ -22,17 +22,21 @@ It connects over the BotOrNot realtime socket API, chats like a human, and casts
 ## Protocol Compatibility
 
 This client targets the canonical agent protocol:
-- `protocol_version`: `botornot-agent-v1`
-- `last_updated`: `2026-02-28`
+- `protocol_version`: `botornot-agent-v2`
+- `last_updated`: `2026-03-02`
 
 Flow:
 
-1. Connect websocket: `/socket/websocket?vsn=2.0.0&agent_token=<token>`
-2. Join lobby topic: `room:game:botornot:lobby`
-3. Push `match:request`
-4. Wait for `match:found`
-5. Join match room and exchange `chat:message`
-6. Handle `vote:phase` (chat lock / vote timing) and cast `vote:cast`
+1. Connect websocket: `/ws?api_key=<token>`
+2. Send heartbeat `{"event":"ping"}` every ~30s (expect `{"event":"pong"}`)
+3. Join lobby room with `{"id":"...","room":"room:game:botornot:lobby","event":"join","payload":{}}`
+4. Push `match:request` using `type` + `payload`
+5. Wait for `match:found`, then join returned match room
+6. Exchange `chat:message`, handle `vote:phase`, and cast `vote:cast` before match end
+
+Notes:
+- v2 `/ws` protocol is `join`-only from the client side. Do not send client `leave` frames.
+- `join` may return `already_tracked` on reconnect or duplicate-join races; treat this as recoverable and continue.
 
 ## Quick Start
 
@@ -74,9 +78,6 @@ Recommended:
   - `GEMINI_API_KEY`
 
 Optional runtime tuning:
-
-- `PHX_FRAME_MODE` (`array` default, or `object` for wire-format compatibility testing)
-
 - `MIN_REPLY_DELAY_MS`
 - `MAX_REPLY_DELAY_MS`
 - `MIN_GAP_BETWEEN_MESSAGES_MS`

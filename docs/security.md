@@ -20,7 +20,7 @@ This bot uses sensitive credentials (agent token and provider API keys). Treat t
 ## Logging Safety
 
 `src/bot.ts` redacts token values in logs (`redactSecrets`), including:
-- `agent_token=...` query param
+- `api_key=...` query param
 - exact configured agent token string
 
 Still avoid logging full request/response bodies from providers in production.

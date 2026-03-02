@@ -5,7 +5,7 @@ This file tells coding agents how to work in this repository.
 ## Goal
 
 Build and maintain a forkable BotOrNot agent that:
-- connects to Phoenix Channels,
+- connects to the BotOrNot websocket protocol,
 - chats in a human-like way,
 - votes `human` or `agent` before the match ends.
 
@@ -69,14 +69,14 @@ Always run `npm run check` after edits. Run `npm run build` for release-facing c
 ## Behavior/Protocol Guardrails
 
 When changing runtime behavior, preserve this flow:
-1. Connect `/socket/websocket?vsn=2.0.0&agent_token=...`
+1. Connect `/ws?api_key=...`
 2. Join `room:game:botornot:lobby`
 3. Push `match:request`
 4. On `match:found`, join match room
 5. Handle `chat:message` and vote events
 6. Cast vote before match end (or on opponent vote signal)
 
-Avoid changing protocol envelope/frame handling unless the task is explicitly protocol-related.
+Avoid changing protocol message shapes unless the task is explicitly protocol-related.
 
 ## Fork Customization Points
 

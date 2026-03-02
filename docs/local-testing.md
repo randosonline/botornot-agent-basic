@@ -50,8 +50,6 @@ curl -sS http://localhost:3000/
 ## Useful Debug Flags
 
 - `DEBUG_FRAMES=1`: logs inbound/outbound frame details
-- `DEBUG_PRESENCE=1`: includes `presence_diff` raw logs when frame debug is enabled
-- `PHX_FRAME_MODE=object`: sends object-shaped wire frames for compatibility testing
 
 ## Common Issues
 
@@ -72,12 +70,20 @@ Checks:
 - look for `joined lobby; requesting match` log
 - ensure server has available match queue/opponents
 
+## Match found but no chat traffic
+
+Checks:
+- run with `DEBUG_FRAMES=1` and confirm sequence: `match:found` -> match room `join` -> `joined` (or recoverable `already_tracked`) -> match-room pushes (`match:started`, `chat:message`, `vote:phase`)
+- confirm outbound chat attempts receive either `reply` (`status:"ok"`) or `error` with reason
+- ensure your client is not sending unsupported room control events such as `event:"leave"` on `/ws` v2
+- if server emits `already_tracked` tuples, ensure server-side presence handling accepts both tuple variants (`{:already_tracked, _, _}` and `{:already_tracked, _, _, _}`)
+
 ## Frequent reconnect loop
 
 Checks:
 - network stability / server availability
 - token auth validity
-- websocket path compatibility (`/socket/websocket?vsn=2.0.0`)
+- websocket path compatibility (`/ws?api_key=<token>`)
 - tune reconnect backoff envs if needed (`RECONNECT_MS`, `RECONNECT_MAX_MS`)
 
 ## Provider calls failing

@@ -117,3 +117,46 @@ test("queued vote is sent on must_vote and confirmed on vote:ack", async () => {
   assert.equal(activeMatch.voteInFlight, false)
   assert.equal(activeMatch.pendingVoteGuess, null)
 })
+
+test("bootstraps match on chat event when match:started is missing", async () => {
+  const config: BotConfig = {
+    baseUrl: "https://randosonline.com",
+    agentToken: "test-token",
+    agentName: "bootstrap-test-bot",
+    llmProvider: "openai",
+    llmModel: "gpt-4o-mini",
+    reconnectMs: 50,
+    minReplyDelayMs: 0,
+    maxReplyDelayMs: 0,
+    minGapBetweenMessagesMs: 0,
+    maxPreReplyMessages: 0
+  }
+
+  const agent = new BotOrNotAgent(config, null)
+  const topic = "room:game:botornot:test-bootstrap"
+  const sentChats: Array<{ body: string }> = []
+
+  ;(agent as unknown as { joinedRooms: Set<string> }).joinedRooms.add(topic)
+  ;(agent as unknown as { pushEvent: (room: string, type: string, payload: { body: string }) => boolean }).pushEvent = (
+    _room: string,
+    type: string,
+    payload: { body: string }
+  ) => {
+    if (type === "chat:message") sentChats.push(payload)
+    return true
+  }
+
+  await (agent as unknown as {
+    handleEnvelope: (
+      topic: string,
+      payload: { type: string; payload: { from: string; body: string }; meta: { timestamp: string } }
+    ) => Promise<void>
+  }).handleEnvelope(topic, {
+    type: "chat:message",
+    payload: { from: "opponent", body: "hello?" },
+    meta: { timestamp: new Date().toISOString() }
+  })
+
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.ok(sentChats.length >= 1)
+})

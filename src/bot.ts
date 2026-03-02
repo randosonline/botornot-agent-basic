@@ -11,6 +11,26 @@ type EnvelopePayload = {
   }
 }
 
+type InboundMessage = {
+  id?: string | number
+  room?: string
+  event?: string
+  type?: string
+  payload?: Record<string, unknown>
+  meta?: {
+    timestamp?: string
+    user_id?: string | number
+  }
+}
+
+type OutboundMessage = {
+  id?: string
+  room?: string
+  event?: string
+  type?: string
+  payload?: Record<string, unknown>
+}
+
 type MatchState = {
   topic: string
   matchId: string
@@ -31,24 +51,17 @@ type MatchState = {
   lastTokenRefillAt: number
 }
 
-type OutboundFrame = {
-  topic: string
-  event: string
-  payload: Record<string, unknown>
-  ref: string
-  join_ref: string | null
-}
-
 type PendingPush = {
-  topic: string
-  event: string
-  channelType?: string
-  joinRef: string | null
+  room: string
+  event: "join" | "push"
+  messageType?: string
 }
 
 type SendChatOptions = {
   onlyBeforeOpponentReply?: boolean
 }
+
+const LOBBY_ROOM = "room:game:botornot:lobby"
 
 const PRE_REPLY_OPENERS = [
   "yo, how's your day going?",
@@ -60,23 +73,22 @@ const PRE_REPLY_OPENERS = [
 
 export class BotOrNotAgent {
   private ws: WebSocket | null = null
-  private ref = 1
+  private messageId = 1
   private heartbeatTimer: NodeJS.Timeout | null = null
   private reconnectTimer: NodeJS.Timeout | null = null
   private proactiveTimer: NodeJS.Timeout | null = null
   private voteDeadlineTimer: NodeJS.Timeout | null = null
   private match: MatchState | null = null
   private readonly debugFrames = process.env.DEBUG_FRAMES === "1"
-  private readonly debugPresence = process.env.DEBUG_PRESENCE === "1"
-  private readonly frameMode = process.env.PHX_FRAME_MODE === "object" ? "object" : "array"
-  private readonly topicJoinRefs = new Map<string, string>()
-  private readonly joinedTopics = new Set<string>()
+  private readonly joinedRooms = new Set<string>()
   private readonly pendingPushes = new Map<string, PendingPush>()
   private readonly chatBurstLimit = 3
   private readonly chatRefillPerSec = 1
   private reconnectAttempt = 0
   private awaitingMatch = false
   private lastMatchRequestAt = 0
+  private activeMatchRoom: string | null = null
+  private activeMatchAssignedAt = 0
 
   constructor(
     private readonly config: BotConfig,
@@ -96,7 +108,7 @@ export class BotOrNotAgent {
       this.log("connected")
       this.reconnectAttempt = 0
       this.startHeartbeat()
-      this.joinTopic("room:game:botornot:lobby")
+      this.joinRoom(LOBBY_ROOM)
     })
 
     this.ws.on("message", data => {
@@ -117,8 +129,8 @@ export class BotOrNotAgent {
       this.match = null
       this.awaitingMatch = false
       this.lastMatchRequestAt = 0
-      this.topicJoinRefs.clear()
-      this.joinedTopics.clear()
+      this.clearActiveMatchRoom()
+      this.joinedRooms.clear()
       this.pendingPushes.clear()
       this.scheduleReconnect(reconnectInMs)
     })
@@ -145,47 +157,114 @@ export class BotOrNotAgent {
       return
     }
 
-    if (this.debugFrames && this.shouldLogInboundRaw(parsed)) {
-      this.log(`recv ${frame}`)
-    }
-
-    const msg = normalizeInboundFrame(parsed)
+    const msg = normalizeInboundMessage(parsed)
     if (!msg) return
 
-    const topic = String(msg.topic ?? "")
-    const event = String(msg.event ?? "")
-    const ref = msg.ref == null ? null : String(msg.ref)
-    const payload = (msg.payload ?? {}) as Record<string, unknown>
+    if (this.debugFrames && this.shouldLogInboundRaw(msg)) {
+      this.log(`recv ${JSON.stringify(msg)}`)
+    }
 
-    if (event === "phx_reply") {
-      const pending = this.logPhxReply(topic, ref, payload)
-      if (topic === "room:game:botornot:lobby" && pending?.event === "event" && pending.channelType === "match:request") {
-        this.handleMatchRequestReply(payload)
-      }
-      if (pending?.event === "event" && pending.channelType === "vote:cast") {
-        this.handleVoteCastReply(payload)
-      }
-      if (String((payload as { status?: string }).status ?? "") === "ok" && pending?.event === "phx_join") {
-        this.joinedTopics.add(topic)
-      }
-      if (
-        topic === "room:game:botornot:lobby" &&
-        String((payload as { status?: string }).status ?? "") === "ok" &&
-        pending?.event === "phx_join"
-      ) {
-        this.log("joined lobby; requesting match")
-        this.requestMatch(topic)
-      }
+    if (msg.event === "pong") return
+
+    const room = String(msg.room ?? "")
+    const id = msg.id == null ? null : String(msg.id)
+    const payload = msg.payload ?? {}
+
+    if (msg.event === "joined") {
+      this.handleJoinAck(room, id)
       return
     }
 
-    if (event === "phx_close" || event === "phx_error") {
-      this.joinedTopics.delete(topic)
+    if (msg.event === "reply" || msg.event === "error") {
+      this.handleReplyOrError(room, id, msg.event, payload)
       return
     }
 
-    if (event !== "event") return
-    await this.handleEnvelope(topic, payload as EnvelopePayload)
+    if (msg.type) {
+      await this.handleEnvelope(room, {
+        type: msg.type,
+        payload,
+        meta: msg.meta
+      })
+    }
+  }
+
+  private handleJoinAck(room: string, id: string | null): void {
+    if (!room) return
+
+    if (id) {
+      const pending = this.pendingPushes.get(id)
+      this.pendingPushes.delete(id)
+      if (this.debugFrames) {
+        const pendingLabel = pending ? ` pending=${pending.event}` : ""
+        this.log(`in joined room=${room} id=${id}${pendingLabel}`)
+      }
+    }
+
+    this.joinedRooms.add(room)
+
+    if (room === LOBBY_ROOM) {
+      this.log("joined lobby; requesting match")
+      this.requestMatch(room)
+    }
+  }
+
+  private handleReplyOrError(
+    room: string,
+    id: string | null,
+    event: "reply" | "error",
+    payload: Record<string, unknown>
+  ): void {
+    const pending = id ? this.pendingPushes.get(id) ?? null : null
+    if (id) this.pendingPushes.delete(id)
+
+    if (this.debugFrames) {
+      this.log(
+        `in ${event} room=${room || "<none>"} id=${id ?? "null"} payload=${JSON.stringify(payload)}${
+          pending ? ` for=${pending.event}${pending.messageType ? `/${pending.messageType}` : ""}` : ""
+        }`
+      )
+    }
+
+    if (!pending) return
+
+    if (pending.event === "join" && event === "error") {
+      const reason = this.formatReason(payload.reason)
+      if (this.isAlreadyTrackedReason(reason)) {
+        const trackedRoom = this.extractAlreadyTrackedRoom(reason)
+        if (trackedRoom === pending.room) {
+          this.log(`join already tracked room=${pending.room}; treating as joined`)
+          this.handleJoinAck(pending.room, id)
+          return
+        }
+        if (trackedRoom === LOBBY_ROOM && pending.room !== LOBBY_ROOM) {
+          this.log(`join blocked by lobby tracking; retrying match join`)
+          setTimeout(() => this.joinRoom(pending.room), randomInt(300, 900))
+          return
+        }
+        this.log(`join already tracked room=${pending.room} reason=${reason}`)
+        return
+      }
+      this.log(`join rejected room=${pending.room} reason=${reason}`)
+      return
+    }
+
+    if (pending.event !== "push") return
+
+    if (pending.messageType === "match:request") {
+      this.handleMatchRequestReply(payload, event)
+      return
+    }
+
+    if (pending.messageType === "vote:cast") {
+      this.handleVoteCastReply(payload, event)
+      return
+    }
+
+    if (event === "error") {
+      const reason = String(payload.reason ?? "unknown")
+      this.log(`event rejected type=${pending.messageType ?? "unknown"} reason=${reason}`)
+    }
   }
 
   private async handleEnvelope(topic: string, envelope: EnvelopePayload): Promise<void> {
@@ -193,12 +272,13 @@ export class BotOrNotAgent {
     const payload = envelope.payload ?? {}
     const timestamp = envelope.meta?.timestamp ?? new Date().toISOString()
 
-    if (topic === "room:game:botornot:lobby") {
+    if (topic === LOBBY_ROOM) {
       if (type === "match:found") {
         const room = String(payload.room ?? "")
         const matchId = String(payload.match_id ?? "")
         if (!room || !matchId) return
-        const alreadyInRoom = this.match?.topic === room || this.joinedTopics.has(room)
+        this.markActiveMatchRoom(room)
+        const alreadyInRoom = this.match?.topic === room || this.joinedRooms.has(room)
         this.stopProactiveMessages()
         this.stopVoteDeadlineTimer()
         this.stopTyping()
@@ -206,7 +286,7 @@ export class BotOrNotAgent {
         this.awaitingMatch = false
         this.log(`match found ${matchId}`)
         if (alreadyInRoom) return
-        this.joinTopic(room)
+        this.joinRoom(room)
       }
       return
     }
@@ -235,10 +315,27 @@ export class BotOrNotAgent {
         chatTokens: this.chatBurstLimit,
         lastTokenRefillAt: Date.now()
       }
+      this.markActiveMatchRoom(topic)
       this.log(`match started ${matchId}`)
       this.schedulePreReplyMessage()
       this.scheduleVoteBeforeDeadline()
       return
+    }
+
+    if (type === "match:ended") {
+      this.log("match ended; queueing next request")
+      this.stopProactiveMessages()
+      this.stopVoteDeadlineTimer()
+      this.stopTyping()
+      this.clearActiveMatchRoom()
+      this.match = null
+      this.awaitingMatch = false
+      this.joinRoom(LOBBY_ROOM)
+      return
+    }
+
+    if (!this.match && this.isMatchRoom(topic) && this.shouldBootstrapMatchFromEvent(type)) {
+      this.bootstrapMatchFromEvent(topic, payload)
     }
 
     if (!this.match || topic !== this.match.topic) return
@@ -304,18 +401,6 @@ export class BotOrNotAgent {
       } else {
         this.match.transcript.push({ from: "self", body, timestamp })
       }
-      return
-    }
-
-    if (type === "match:ended") {
-      this.log("match ended; queueing next request")
-      this.stopProactiveMessages()
-      this.stopVoteDeadlineTimer()
-      this.stopTyping()
-      this.match = null
-      setTimeout(() => {
-        this.requestMatch("room:game:botornot:lobby")
-      }, randomInt(700, 1400))
       return
     }
 
@@ -480,73 +565,89 @@ export class BotOrNotAgent {
     this.stopVoteDeadlineTimer()
   }
 
-  private handleVoteCastReply(payload: Record<string, unknown>): void {
+  private handleVoteCastReply(payload: Record<string, unknown>, eventKind: "reply" | "error"): void {
     if (!this.match || this.match.voted) return
-    const status = String(payload.status ?? "")
-    if (status === "ok") {
-      this.handleVoteAccepted()
+
+    if (eventKind === "reply") {
+      const status = String(payload.status ?? "")
+      if (status === "ok") {
+        this.handleVoteAccepted()
+        return
+      }
+
+      this.match.voteInFlight = false
+      const reason = String(payload.reason ?? "")
+      const details = reason ? ` reason=${reason}` : ""
+      this.log(`vote cast rejected status=${status || "unknown"}${details}`)
       return
     }
 
     this.match.voteInFlight = false
-    const reason = String((payload.response as { reason?: string } | undefined)?.reason ?? "")
+    const reason = String(payload.reason ?? "")
     const details = reason ? ` reason=${reason}` : ""
-    this.log(`vote cast rejected status=${status}${details}`)
+    this.log(`vote cast error${details}`)
   }
 
-  private joinTopic(topic: string): void {
-    if (this.joinedTopics.has(topic)) {
-      if (this.debugFrames) this.log(`skip join topic=${topic}; already joined`)
+  private joinRoom(room: string): void {
+    if (this.joinedRooms.has(room)) {
+      if (this.debugFrames) this.log(`skip join room=${room}; already joined`)
       return
     }
 
-    const pendingJoin = [...this.pendingPushes.values()].some(p => p.topic === topic && p.event === "phx_join")
+    const pendingJoin = [...this.pendingPushes.values()].some(p => p.room === room && p.event === "join")
     if (pendingJoin) {
-      if (this.debugFrames) this.log(`skip join topic=${topic}; join in-flight`)
+      if (this.debugFrames) this.log(`skip join room=${room}; join in-flight`)
       return
     }
 
-    const joinRef = this.getOrCreateTopicJoinRef(topic)
-    this.send({
-      topic,
-      event: "phx_join",
-      payload: {},
-      ref: this.nextRef(),
-      join_ref: joinRef
-    })
+    const id = this.nextMessageId()
+    this.send(
+      {
+        id,
+        room,
+        event: "join",
+        payload: {}
+      },
+      {
+        room,
+        event: "join"
+      }
+    )
   }
 
-  private pushEvent(topic: string, type: string, payload: Record<string, unknown>): boolean {
-    const joinRef = this.topicJoinRefs.get(topic)
-    if (!joinRef) {
-      this.log(`skip push topic=${topic} type=${type}; missing join_ref`)
+  private pushEvent(room: string, type: string, payload: Record<string, unknown>): boolean {
+    if (!this.joinedRooms.has(room)) {
+      this.log(`skip push room=${room} type=${type}; room not joined`)
       return false
     }
-    return this.send({
-      topic,
-      event: "event",
-      payload: { type, payload },
-      ref: this.nextRef(),
-      join_ref: joinRef
-    })
+
+    const id = this.nextMessageId()
+    return this.send(
+      {
+        id,
+        room,
+        type,
+        payload
+      },
+      {
+        room,
+        event: "push",
+        messageType: type
+      }
+    )
   }
 
   private startHeartbeat(): void {
     this.stopHeartbeat()
     this.heartbeatTimer = setInterval(() => {
-      this.send({
-        topic: "phoenix",
-        event: "heartbeat",
-        payload: {},
-        ref: this.nextRef(),
-        join_ref: null
-      })
+      this.send({ event: "ping" })
 
       if (!this.match) {
+        this.expireStaleActiveMatchAssignment()
         const elapsed = Date.now() - this.lastMatchRequestAt
-        if (!this.awaitingMatch || elapsed > 20000) {
+        if ((!this.awaitingMatch || elapsed > 20000) && !this.hasActiveMatchAssignment()) {
           this.log("still waiting for match; re-requesting")
-          this.requestMatch("room:game:botornot:lobby")
+          this.requestMatch(LOBBY_ROOM)
         }
       }
     }, 30000)
@@ -567,37 +668,33 @@ export class BotOrNotAgent {
     this.voteDeadlineTimer = null
   }
 
-  private send(frame: OutboundFrame): boolean {
+  private send(message: OutboundMessage, pending?: PendingPush): boolean {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return false
-    const encoded = this.encodeFrame(frame)
-    const channelType =
-      frame.event === "event" && typeof frame.payload.type === "string" ? String(frame.payload.type) : undefined
-    this.pendingPushes.set(frame.ref, {
-      topic: frame.topic,
-      event: frame.event,
-      channelType,
-      joinRef: frame.join_ref
-    })
-    if (this.debugFrames) {
-      this.log(
-        `out frame topic=${frame.topic} event=${frame.event} ref=${frame.ref} join_ref=${frame.join_ref ?? "null"}`
-      )
+
+    if (message.id && pending) {
+      this.pendingPushes.set(message.id, pending)
     }
-    this.ws.send(JSON.stringify(encoded))
+
+    if (this.debugFrames) {
+      this.log(`out ${JSON.stringify(message)}`)
+    }
+
+    this.ws.send(JSON.stringify(message))
     return true
   }
 
-  private nextRef(): string {
-    const value = String(this.ref)
-    this.ref += 1
+  private nextMessageId(): string {
+    const value = String(this.messageId)
+    this.messageId += 1
     return value
   }
 
   private buildSocketUrl(): string {
-    const url = new URL(this.config.baseUrl)
-    const wsProtocol = url.protocol === "https:" ? "wss:" : "ws:"
-    const token = encodeURIComponent(this.config.agentToken)
-    return `${wsProtocol}//${url.host}/socket/websocket?vsn=2.0.0&agent_token=${token}&api_key=${token}`
+    const base = new URL(this.config.baseUrl)
+    const wsProtocol = base.protocol === "https:" ? "wss:" : "ws:"
+    const url = new URL("/ws", `${wsProtocol}//${base.host}`)
+    url.searchParams.set("api_key", this.config.agentToken)
+    return url.toString()
   }
 
   private log(msg: string): void {
@@ -605,31 +702,28 @@ export class BotOrNotAgent {
   }
 
   private redactSecrets(text: string): string {
-    let redacted = text.replace(/(agent_token=|api_key=)[^&\s]+/gi, "$1[REDACTED]")
+    let redacted = text.replace(/(api_key=)[^&\s]+/gi, "$1[REDACTED]")
     if (this.config.agentToken) {
       redacted = redacted.split(this.config.agentToken).join("[REDACTED]")
     }
     return redacted
   }
 
-  private encodeFrame(frame: OutboundFrame): unknown {
-    if (this.frameMode === "object") return frame
-    return [frame.join_ref, frame.ref, frame.topic, frame.event, frame.payload]
-  }
-
-  private requestMatch(topic: string): void {
+  private requestMatch(room: string): void {
+    const sent = this.pushEvent(room, "match:request", {})
+    if (!sent) return
     this.awaitingMatch = true
     this.lastMatchRequestAt = Date.now()
-    this.pushEvent(topic, "match:request", {})
   }
 
-  private handleMatchRequestReply(payload: Record<string, unknown>): void {
-    if (String(payload.status ?? "") !== "ok") return
-    const response = payload.response
-    if (typeof response !== "object" || response === null) return
+  private handleMatchRequestReply(payload: Record<string, unknown>, eventKind: "reply" | "error"): void {
+    if (eventKind === "error") {
+      const reason = String(payload.reason ?? "unknown")
+      this.log(`match request rejected reason=${reason}`)
+      return
+    }
 
-    const responseObj = response as Record<string, unknown>
-    const queueStatus = String(responseObj.status ?? "")
+    const queueStatus = String(payload.status ?? "")
     if (queueStatus === "queued" || queueStatus === "already_queued") {
       this.awaitingMatch = true
       return
@@ -637,16 +731,28 @@ export class BotOrNotAgent {
 
     if (queueStatus === "already_active") {
       this.awaitingMatch = false
-      const room = String(responseObj.room ?? "")
-      const matchId = String(responseObj.match_id ?? "")
+      const room = String(payload.room ?? "")
+      const matchId = String(payload.match_id ?? "")
       if (!room) return
+      this.markActiveMatchRoom(room)
 
-      const alreadyInRoom = this.match?.topic === room || this.joinedTopics.has(room)
+      const alreadyInRoom = this.match?.topic === room || this.joinedRooms.has(room)
       this.log(`resuming active match${matchId ? ` ${matchId}` : ""}`)
       if (!alreadyInRoom) {
-        this.joinTopic(room)
+        this.joinRoom(room)
       }
+      return
     }
+
+    if (queueStatus) {
+      this.log(`match request reply status=${queueStatus}`)
+    }
+  }
+
+  private hasActiveMatchAssignment(): boolean {
+    if (this.match) return true
+    if (this.activeMatchRoom) return true
+    return false
   }
 
   private schedulePreReplyMessage(): void {
@@ -680,52 +786,13 @@ export class BotOrNotAgent {
       this.voteDeadlineTimer = null
       void this.castDeadlineVote()
     }, delay)
+    this.voteDeadlineTimer.unref?.()
   }
 
   private shouldSendPreReplyMessage(): boolean {
     if (!this.match) return false
     if (this.match.preReplyMessagesSent >= this.config.maxPreReplyMessages) return false
     return !this.match.transcript.some(turn => turn.from === "opponent")
-  }
-
-  private getOrCreateTopicJoinRef(topic: string): string {
-    const existing = this.topicJoinRefs.get(topic)
-    if (existing) return existing
-    const created = this.nextRef()
-    this.topicJoinRefs.set(topic, created)
-    return created
-  }
-
-  private logPhxReply(topic: string, ref: string | null, payload: Record<string, unknown>): PendingPush | null {
-    if (ref) {
-      const pending = this.pendingPushes.get(ref)
-      this.pendingPushes.delete(ref)
-      if (this.debugFrames) {
-        this.log(
-          `in phx_reply topic=${topic} ref=${ref} status=${String(payload.status ?? "")} response=${JSON.stringify(payload.response ?? {})}${
-            pending
-              ? ` for=${pending.event}${pending.channelType ? `/${pending.channelType}` : ""} join_ref=${pending.joinRef ?? "null"}`
-              : ""
-          }`
-        )
-      }
-      return pending ?? null
-    }
-
-    if (this.debugFrames) {
-      this.log(
-        `in phx_reply topic=${topic} ref=null status=${String(payload.status ?? "")} response=${JSON.stringify(payload.response ?? {})}`
-      )
-    }
-    return null
-  }
-
-  private shouldLogInboundRaw(value: unknown): boolean {
-    const msg = normalizeInboundFrame(value)
-    if (!msg) return true
-    const event = String(msg.event ?? "")
-    if (event === "presence_diff" && !this.debugPresence) return false
-    return true
   }
 
   private buildMatchContext(): MatchContext {
@@ -750,6 +817,88 @@ export class BotOrNotAgent {
       return votedBy.some(value => String(value) === "opponent")
     }
     return String(votedBy ?? "") === "opponent"
+  }
+
+  private shouldLogInboundRaw(message: InboundMessage): boolean {
+    return message.event !== "pong"
+  }
+
+  private markActiveMatchRoom(room: string): void {
+    this.activeMatchRoom = room
+    this.activeMatchAssignedAt = Date.now()
+  }
+
+  private clearActiveMatchRoom(): void {
+    this.activeMatchRoom = null
+    this.activeMatchAssignedAt = 0
+  }
+
+  private expireStaleActiveMatchAssignment(): void {
+    if (!this.activeMatchRoom || this.activeMatchAssignedAt <= 0) return
+    const staleMs = 45_000
+    if (Date.now() - this.activeMatchAssignedAt < staleMs) return
+    const staleRoom = this.activeMatchRoom
+    this.log(`active match assignment stale (${staleRoom}); clearing and requeueing`)
+    this.joinedRooms.delete(staleRoom)
+    this.clearActiveMatchRoom()
+    this.awaitingMatch = false
+    this.joinRoom(LOBBY_ROOM)
+  }
+
+  private isMatchRoom(topic: string): boolean {
+    return topic.startsWith("room:game:botornot:") && topic !== LOBBY_ROOM
+  }
+
+  private shouldBootstrapMatchFromEvent(type: string): boolean {
+    return type === "chat:message" || type === "vote:phase" || type === "vote:cast" || type === "match:opponent_voted"
+  }
+
+  private bootstrapMatchFromEvent(topic: string, payload: Record<string, unknown>): void {
+    const durationSec = Number(payload.duration_sec ?? 240)
+    const endsAt = new Date(String(payload.ends_at ?? ""))
+    const matchId = topic.replace("room:game:botornot:", "")
+    this.match = {
+      topic,
+      matchId,
+      startedAt: new Date(),
+      endsAt: Number.isNaN(endsAt.getTime()) ? new Date(Date.now() + durationSec * 1000) : endsAt,
+      durationSec,
+      transcript: [],
+      voted: false,
+      voteInFlight: false,
+      pendingVoteGuess: null,
+      opponentVoted: false,
+      mustVote: false,
+      chatLocked: false,
+      lastSentAt: 0,
+      preReplyMessagesSent: 0,
+      typingOn: false,
+      chatTokens: this.chatBurstLimit,
+      lastTokenRefillAt: Date.now()
+    }
+    this.markActiveMatchRoom(topic)
+    this.log(`match bootstrap ${matchId} (received match-room event before match:started)`)
+    this.scheduleVoteBeforeDeadline()
+  }
+
+  private isAlreadyTrackedReason(reason: string): boolean {
+    return reason.includes("already_tracked")
+  }
+
+  private extractAlreadyTrackedRoom(reason: string): string | null {
+    const matches = reason.match(/"room:game:botornot:[^"]+"/g)
+    if (!matches || matches.length === 0) return null
+    return matches[0].slice(1, -1)
+  }
+
+  private formatReason(reason: unknown): string {
+    if (typeof reason === "string") return reason
+    if (reason == null) return "unknown"
+    try {
+      return JSON.stringify(reason)
+    } catch {
+      return String(reason)
+    }
   }
 
   private nextReconnectDelayMs(): number {
@@ -795,21 +944,7 @@ function randomFrom<T>(list: T[]): T {
   return list[Math.floor(Math.random() * list.length)]
 }
 
-function normalizeInboundFrame(value: unknown): Record<string, unknown> | null {
-  if (Array.isArray(value) && value.length >= 5) {
-    const [join_ref, ref, topic, event, payload] = value
-    return {
-      join_ref,
-      ref,
-      topic,
-      event,
-      payload
-    }
-  }
-
-  if (typeof value === "object" && value !== null) {
-    return value as Record<string, unknown>
-  }
-
-  return null
+function normalizeInboundMessage(value: unknown): InboundMessage | null {
+  if (typeof value !== "object" || value === null) return null
+  return value as InboundMessage
 }
