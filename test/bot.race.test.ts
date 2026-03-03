@@ -3,19 +3,26 @@ import assert from "node:assert/strict"
 import { BotOrNotAgent } from "../src/bot.js"
 import type { BotConfig } from "../src/types.js"
 
-test("respondToOpponent does not throw when match ends during provider await", async () => {
-  const config: BotConfig = {
+const LOBBY_ROOM = "room:game:botornot:lobby"
+
+function buildTestConfig(agentName: string): BotConfig {
+  return {
     baseUrl: "https://randosonline.com",
     agentToken: "test-token",
-    agentName: "race-test-bot",
+    agentName,
     llmProvider: "openai",
     llmModel: "gpt-4o-mini",
-    reconnectMs: 50,
+    reconnectInitialMs: 50,
+    reconnectMaxMs: 500,
     minReplyDelayMs: 0,
     maxReplyDelayMs: 0,
     minGapBetweenMessagesMs: 0,
     maxPreReplyMessages: 0
   }
+}
+
+test("respondToOpponent does not throw when match ends during provider await", async () => {
+  const config = buildTestConfig("race-test-bot")
 
   const provider = {
     async generateJson(): Promise<string> {
@@ -52,18 +59,7 @@ test("respondToOpponent does not throw when match ends during provider await", a
 })
 
 test("queued vote is sent on must_vote and confirmed on vote:ack", async () => {
-  const config: BotConfig = {
-    baseUrl: "https://randosonline.com",
-    agentToken: "test-token",
-    agentName: "vote-test-bot",
-    llmProvider: "openai",
-    llmModel: "gpt-4o-mini",
-    reconnectMs: 50,
-    minReplyDelayMs: 0,
-    maxReplyDelayMs: 0,
-    minGapBetweenMessagesMs: 0,
-    maxPreReplyMessages: 0
-  }
+  const config = buildTestConfig("vote-test-bot")
 
   const agent = new BotOrNotAgent(config, null)
   const now = new Date()
@@ -119,18 +115,7 @@ test("queued vote is sent on must_vote and confirmed on vote:ack", async () => {
 })
 
 test("bootstraps match on chat event when match:started is missing", async () => {
-  const config: BotConfig = {
-    baseUrl: "https://randosonline.com",
-    agentToken: "test-token",
-    agentName: "bootstrap-test-bot",
-    llmProvider: "openai",
-    llmModel: "gpt-4o-mini",
-    reconnectMs: 50,
-    minReplyDelayMs: 0,
-    maxReplyDelayMs: 0,
-    minGapBetweenMessagesMs: 0,
-    maxPreReplyMessages: 0
-  }
+  const config = buildTestConfig("bootstrap-test-bot")
 
   const agent = new BotOrNotAgent(config, null)
   const topic = "room:game:botornot:test-bootstrap"
@@ -159,4 +144,125 @@ test("bootstraps match on chat event when match:started is missing", async () =>
 
   await new Promise(resolve => setTimeout(resolve, 10))
   assert.ok(sentChats.length >= 1)
+})
+
+test("room:sync joins compliance room and tracks it", async () => {
+  const config = buildTestConfig("room-sync-test-bot")
+  const agent = new BotOrNotAgent(config, null)
+  const complianceRoom = "room:session:AbCd1234QwEr"
+  const joined: string[] = []
+
+  ;(agent as unknown as { joinRoom: (room: string) => void }).joinRoom = (room: string) => {
+    joined.push(room)
+  }
+
+  await (agent as unknown as {
+    handleEnvelope: (topic: string, payload: { type: string; payload: { room: string } }) => Promise<void>
+  }).handleEnvelope(LOBBY_ROOM, { type: "room:sync", payload: { room: complianceRoom } })
+
+  assert.equal((agent as unknown as { complianceRoom: string | null }).complianceRoom, complianceRoom)
+  assert.deepEqual(joined, [complianceRoom])
+})
+
+test("compliance challenge echoes probe token and retries match request", async () => {
+  const config = buildTestConfig("probe-echo-test-bot")
+  const agent = new BotOrNotAgent(config, null)
+  const complianceRoom = "room:session:AbCd1234QwEr"
+  const probeToken = "1a2b3c4d"
+  const sent: Array<{ room: string; type: string; payload: Record<string, unknown> }> = []
+
+  ;(agent as unknown as { complianceRoom: string | null }).complianceRoom = complianceRoom
+  ;(agent as unknown as { joinedRooms: Set<string> }).joinedRooms.add(complianceRoom)
+  ;(agent as unknown as { joinedRooms: Set<string> }).joinedRooms.add(LOBBY_ROOM)
+  ;(agent as unknown as {
+    pushEvent: (room: string, type: string, payload: Record<string, unknown>) => boolean
+  }).pushEvent = (room: string, type: string, payload: Record<string, unknown>) => {
+    sent.push({ room, type, payload })
+    return true
+  }
+
+  await (agent as unknown as {
+    handleEnvelope: (
+      topic: string,
+      payload: { type: string; payload: { body: string; probe_token: string } }
+    ) => Promise<void>
+  }).handleEnvelope(complianceRoom, {
+    type: "chat:message",
+    payload: { body: "compliance check", probe_token: probeToken }
+  })
+
+  assert.equal(sent.length, 2)
+  assert.deepEqual(sent[0], {
+    room: complianceRoom,
+    type: "chat:message",
+    payload: { body: probeToken }
+  })
+  assert.deepEqual(sent[1], {
+    room: LOBBY_ROOM,
+    type: "match:request",
+    payload: {}
+  })
+})
+
+test("probe_required reply joins required compliance room", () => {
+  const config = buildTestConfig("probe-required-test-bot")
+  const agent = new BotOrNotAgent(config, null)
+  const complianceRoom = "room:session:AbCd1234QwEr"
+  const joined: string[] = []
+
+  ;(agent as unknown as { joinRoom: (room: string) => void }).joinRoom = (room: string) => {
+    joined.push(room)
+  }
+  ;(agent as unknown as { awaitingMatch: boolean }).awaitingMatch = true
+
+  ;(agent as unknown as {
+    handleMatchRequestReply: (
+      payload: { status: string; room: string },
+      eventKind: "reply" | "error"
+    ) => void
+  }).handleMatchRequestReply({ status: "probe_required", room: complianceRoom }, "reply")
+
+  assert.equal((agent as unknown as { awaitingMatch: boolean }).awaitingMatch, false)
+  assert.equal((agent as unknown as { complianceRoom: string | null }).complianceRoom, complianceRoom)
+  assert.deepEqual(joined, [complianceRoom])
+})
+
+test("duplicate probe token delivery does not resend compliance echo", async () => {
+  const config = buildTestConfig("probe-dedupe-test-bot")
+  const agent = new BotOrNotAgent(config, null)
+  const complianceRoom = "room:session:AbCd1234QwEr"
+  const probeToken = "1a2b3c4d"
+  const sent: Array<{ room: string; type: string; payload: Record<string, unknown> }> = []
+
+  ;(agent as unknown as { complianceRoom: string | null }).complianceRoom = complianceRoom
+  ;(agent as unknown as { joinedRooms: Set<string> }).joinedRooms.add(complianceRoom)
+  ;(agent as unknown as { joinedRooms: Set<string> }).joinedRooms.add(LOBBY_ROOM)
+  ;(agent as unknown as {
+    pushEvent: (room: string, type: string, payload: Record<string, unknown>) => boolean
+  }).pushEvent = (room: string, type: string, payload: Record<string, unknown>) => {
+    sent.push({ room, type, payload })
+    return true
+  }
+
+  const handleEnvelope = (agent as unknown as {
+    handleEnvelope: (
+      topic: string,
+      payload: { type: string; payload: { body: string; probe_token: string } }
+    ) => Promise<void>
+  }).handleEnvelope.bind(agent)
+
+  await handleEnvelope(complianceRoom, {
+    type: "chat:message",
+    payload: { body: "compliance check", probe_token: probeToken }
+  })
+  await handleEnvelope(complianceRoom, {
+    type: "chat:message",
+    payload: { body: "compliance check", probe_token: probeToken }
+  })
+
+  const complianceEchoes = sent.filter(event => event.room === complianceRoom && event.type === "chat:message")
+  const queueRequests = sent.filter(event => event.room === LOBBY_ROOM && event.type === "match:request")
+
+  assert.equal(complianceEchoes.length, 1)
+  assert.equal(queueRequests.length, 1)
 })

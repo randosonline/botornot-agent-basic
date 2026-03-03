@@ -69,6 +69,21 @@ Checks:
 - verify base URL points to the correct server
 - look for `joined lobby; requesting match` log
 - ensure server has available match queue/opponents
+- if you see `probe_required`, complete opaque compliance-room flow (`room:sync` -> join room -> echo `probe_token`) before re-requesting match
+
+## `probe_required` keeps repeating
+
+Checks:
+- confirm you join the `room` returned by lobby `room:sync` or `match:request` `probe_required` reply
+- confirm your compliance-room `chat:message` sends `payload.body` exactly equal to the provided `probe_token`
+- ensure your runtime retries `match:request` after probe echo is sent
+
+## `:invalid_probe_token` errors
+
+Checks:
+- do not reuse older probe tokens; echo only the latest token from the most recent compliance challenge
+- avoid extra formatting/whitespace in `payload.body`; token must match exactly
+- treat this as recoverable and wait for the next compliance challenge token
 
 ## Match found but no chat traffic
 

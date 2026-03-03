@@ -89,6 +89,9 @@ export class BotOrNotAgent {
   private lastMatchRequestAt = 0
   private activeMatchRoom: string | null = null
   private activeMatchAssignedAt = 0
+  private complianceRoom: string | null = null
+  private pendingProbeToken: string | null = null
+  private lastProbeTokenEchoed: string | null = null
 
   constructor(
     private readonly config: BotConfig,
@@ -130,6 +133,7 @@ export class BotOrNotAgent {
       this.awaitingMatch = false
       this.lastMatchRequestAt = 0
       this.clearActiveMatchRoom()
+      this.clearComplianceState()
       this.joinedRooms.clear()
       this.pendingPushes.clear()
       this.scheduleReconnect(reconnectInMs)
@@ -207,6 +211,10 @@ export class BotOrNotAgent {
       this.log("joined lobby; requesting match")
       this.requestMatch(room)
     }
+
+    if (room === this.complianceRoom && this.pendingProbeToken) {
+      this.flushPendingProbeEcho()
+    }
   }
 
   private handleReplyOrError(
@@ -273,6 +281,14 @@ export class BotOrNotAgent {
     const timestamp = envelope.meta?.timestamp ?? new Date().toISOString()
 
     if (topic === LOBBY_ROOM) {
+      if (type === "room:sync") {
+        const room = String(payload.room ?? "")
+        if (!room) return
+        this.trackComplianceRoom(room)
+        this.joinRoom(room)
+        return
+      }
+
       if (type === "match:found") {
         const room = String(payload.room ?? "")
         const matchId = String(payload.match_id ?? "")
@@ -288,6 +304,11 @@ export class BotOrNotAgent {
         if (alreadyInRoom) return
         this.joinRoom(room)
       }
+      return
+    }
+
+    if (this.isComplianceRoom(topic)) {
+      this.handleComplianceEnvelope(topic, type, payload)
       return
     }
 
@@ -729,6 +750,19 @@ export class BotOrNotAgent {
       return
     }
 
+    if (queueStatus === "probe_required") {
+      this.awaitingMatch = false
+      const room = String(payload.room ?? "")
+      if (!room) {
+        this.log("match request requires probe, but no compliance room provided")
+        return
+      }
+      this.log(`match request requires probe in room=${room}`)
+      this.trackComplianceRoom(room)
+      this.joinRoom(room)
+      return
+    }
+
     if (queueStatus === "already_active") {
       this.awaitingMatch = false
       const room = String(payload.room ?? "")
@@ -753,6 +787,67 @@ export class BotOrNotAgent {
     if (this.match) return true
     if (this.activeMatchRoom) return true
     return false
+  }
+
+  private isComplianceRoom(topic: string): boolean {
+    return Boolean(this.complianceRoom) && topic === this.complianceRoom
+  }
+
+  private handleComplianceEnvelope(topic: string, type: string, payload: Record<string, unknown>): void {
+    if (type !== "chat:message") return
+    const probeToken = String(payload.probe_token ?? "").trim()
+    if (!probeToken) return
+    this.queueProbeEcho(topic, probeToken)
+  }
+
+  private queueProbeEcho(room: string, probeToken: string): void {
+    if (!probeToken) return
+    this.trackComplianceRoom(room)
+
+    if (this.pendingProbeToken === probeToken) return
+    if (this.lastProbeTokenEchoed === probeToken) {
+      if (this.debugFrames) {
+        this.log(`ignoring duplicate probe token for room=${room}`)
+      }
+      return
+    }
+
+    this.pendingProbeToken = probeToken
+    this.flushPendingProbeEcho()
+  }
+
+  private flushPendingProbeEcho(): void {
+    if (!this.complianceRoom || !this.pendingProbeToken) return
+    if (!this.joinedRooms.has(this.complianceRoom)) {
+      this.joinRoom(this.complianceRoom)
+      return
+    }
+
+    const token = this.pendingProbeToken
+    const sent = this.pushEvent(this.complianceRoom, "chat:message", { body: token })
+    if (!sent) return
+
+    this.pendingProbeToken = null
+    this.lastProbeTokenEchoed = token
+    this.log("compliance probe echoed; retrying match request")
+    this.requestMatch(LOBBY_ROOM)
+  }
+
+  private trackComplianceRoom(room: string): void {
+    if (!room) return
+    if (this.complianceRoom !== room) {
+      this.complianceRoom = room
+      this.pendingProbeToken = null
+      this.lastProbeTokenEchoed = null
+      return
+    }
+    this.complianceRoom = room
+  }
+
+  private clearComplianceState(): void {
+    this.complianceRoom = null
+    this.pendingProbeToken = null
+    this.lastProbeTokenEchoed = null
   }
 
   private schedulePreReplyMessage(): void {
