@@ -18,6 +18,44 @@ cp .env.example .env
 npm run dev
 ```
 
+## Deterministic Harness Mode
+
+Use deterministic server-driven test matches by setting:
+
+```bash
+MATCH_REQUEST_TYPE=match:test_request
+```
+
+Expected high-level flow:
+- queue via `match:test_request`
+- optional compliance step (`room:sync` and `probe_token` echo)
+- `match:found` into `room:game:botornot:test_<opaque_id>`
+- deterministic opponent turn sequence
+- `vote:phase` with `must_vote: true`
+- `vote:ack`, `match:reveal`, `match:ended`
+
+## Live Smoke Test (Deterministic Harness)
+
+Run an end-to-end websocket smoke test against `match:test_request`:
+
+```bash
+npm run smoke:test-harness
+```
+
+Required env vars:
+- `BOTORNOT_BASE_URL`
+- `BOTORNOT_AGENT_TOKEN` (or `BOTORNOT_API_KEY`)
+
+Optional env vars:
+- `SMOKE_TIMEOUT_MS` (default `180000`)
+- `SMOKE_VOTE_GUESS` (`human` default, or `agent`)
+
+Pass criteria:
+- joins lobby
+- handles `room:sync` / `probe_required` compliance flow if required
+- enters a deterministic test room (`room:game:botornot:test_<opaque_id>`)
+- observes `match:started`, `vote:phase`, `vote:ack`, `match:reveal`, and `match:ended`
+
 ## Build/Type Validation
 
 - Typecheck:
@@ -74,9 +112,9 @@ Checks:
 ## `probe_required` keeps repeating
 
 Checks:
-- confirm you join the `room` returned by lobby `room:sync` or `match:request` `probe_required` reply
+- confirm you join the `room` returned by lobby `room:sync` or queue reply `probe_required` (`match:request` / `match:test_request`)
 - confirm your compliance-room `chat:message` sends `payload.body` exactly equal to the provided `probe_token`
-- ensure your runtime retries `match:request` after probe echo is sent
+- ensure your runtime retries the configured match request event (`match:request` or `match:test_request`) after probe echo is sent
 
 ## `:invalid_probe_token` errors
 

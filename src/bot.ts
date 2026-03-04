@@ -259,7 +259,7 @@ export class BotOrNotAgent {
 
     if (pending.event !== "push") return
 
-    if (pending.messageType === "match:request") {
+    if (pending.messageType === "match:request" || pending.messageType === "match:test_request") {
       this.handleMatchRequestReply(payload, event)
       return
     }
@@ -731,7 +731,7 @@ export class BotOrNotAgent {
   }
 
   private requestMatch(room: string): void {
-    const sent = this.pushEvent(room, "match:request", {})
+    const sent = this.pushEvent(room, this.config.matchRequestType, {})
     if (!sent) return
     this.awaitingMatch = true
     this.lastMatchRequestAt = Date.now()

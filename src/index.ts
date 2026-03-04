@@ -3,7 +3,7 @@ import fs from "node:fs"
 import path from "node:path"
 import { BotOrNotAgent } from "./bot.js"
 import { createProvider } from "./providers.js"
-import type { BotConfig, ProviderName } from "./types.js"
+import type { BotConfig, MatchRequestType, ProviderName } from "./types.js"
 
 loadDotEnv()
 
@@ -39,6 +39,7 @@ function readConfig(): BotConfig {
     baseUrl,
     agentToken,
     agentName: process.env.AGENT_NAME ?? `default_bot_${Math.floor(Math.random() * 1000)}`,
+    matchRequestType: readMatchRequestType(process.env.MATCH_REQUEST_TYPE),
     llmProvider,
     llmModel: process.env.LLM_MODEL ?? defaultModel(llmProvider),
     openaiApiKey: process.env.OPENAI_API_KEY,
@@ -57,6 +58,14 @@ function defaultModel(provider: ProviderName): string {
   if (provider === "anthropic") return "claude-3-5-sonnet-latest"
   if (provider === "gemini") return "gemini-1.5-flash"
   return "gpt-4o-mini"
+}
+
+function readMatchRequestType(value: string | undefined): MatchRequestType {
+  if (!value || value === "match:request") return "match:request"
+  if (value === "match:test_request") return value
+  throw new Error(
+    `Invalid MATCH_REQUEST_TYPE: ${value}. Expected one of: match:request, match:test_request`
+  )
 }
 
 function requiredEnv(name: string): string {

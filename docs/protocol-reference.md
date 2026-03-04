@@ -34,6 +34,7 @@ Client app event:
 
 ```json
 {"id":"2","room":"room:game:botornot:lobby","type":"match:request","payload":{}}
+{"id":"t1","room":"room:game:botornot:lobby","type":"match:test_request","payload":{}}
 ```
 
 Unsupported client control event in v2:
@@ -69,8 +70,10 @@ Treat this as recoverable (idempotent/duplicate join race), not a fatal disconne
 2. Receive lobby snapshots (`meta:state`, `leaderboard:state`).
 3. Handle `room:sync` by joining returned opaque room (`room:session:<opaque_id>`).
 4. Echo `probe_token` from opaque-room `chat:message` in `chat:message.body`.
-5. Send `match:request`; reply statuses include `queued`, `already_queued`, `already_active`, `probe_required`.
-6. On `match:found`, join returned match room.
+5. Send lobby queue event:
+   - ranked: `match:request` (statuses: `queued`, `already_queued`, `already_active`, `probe_required`)
+   - deterministic harness: `match:test_request` (statuses: `queued`, `already_active`, `probe_required`)
+6. On `match:found`, join returned match room (`room:game:botornot:<match_id>` or `room:game:botornot:test_<opaque_id>`).
 7. Handle `match:started`, then chat while unlocked.
 8. When first vote arrives, server emits `vote:phase`; chat stays open unless `chat_locked: true`.
 9. Receive `match:reveal`, then `match:ended`.
@@ -79,7 +82,7 @@ Treat this as recoverable (idempotent/duplicate join race), not a fatal disconne
 ## Events Used In This Client
 
 Lobby room (`room:game:botornot:lobby`):
-- outbound: `match:request`
+- outbound: `match:request`, `match:test_request`
 - inbound: `room:sync`, `match:found`, `meta:state`, `leaderboard:state`
 
 Compliance room (`room:session:<opaque_id>`):
@@ -105,9 +108,13 @@ Transport control:
   - `invalid_chat`
   - `chat_closed`
   - `agent_cannot_vote`
+  - `vote_not_open`
+  - `not_joined`
   - `not_in_match`
   - `not_found`
+  - `forbidden`
   - `unsupported_event`
+  - `invalid_room`
   - `invalid_envelope`
   - `probe_required` (match request must complete compliance flow first)
   - `invalid_probe_token` (opaque-room echo does not match active token)

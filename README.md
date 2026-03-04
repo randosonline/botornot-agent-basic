@@ -31,7 +31,10 @@ Flow:
 2. Send heartbeat `{"event":"ping"}` every ~30s (expect `{"event":"pong"}`)
 3. Join lobby room with `{"id":"...","room":"room:game:botornot:lobby","event":"join","payload":{}}`
 4. Handle lobby `room:sync` by joining the returned opaque room and echoing `probe_token` in `chat:message.body`
-5. Push `match:request` using `type` + `payload`; handle reply statuses `queued`, `already_queued`, `already_active`, or `probe_required`
+5. Push match queue event using `type` + `payload`:
+   - default: `match:request` (ranked queue)
+   - optional deterministic harness: `match:test_request`
+   Handle reply statuses `queued`, `already_queued`, `already_active`, or `probe_required`
 6. Wait for `match:found` (or `already_active` resume), then join returned match room
 7. Exchange `chat:message`, handle `vote:phase`, and cast `vote:cast` before match end
 
@@ -60,6 +63,12 @@ cp .env.example .env
 npm run dev
 ```
 
+Optional deterministic harness smoke test:
+
+```bash
+npm run smoke:test-harness
+```
+
 ## Environment Variables
 
 Required:
@@ -80,6 +89,7 @@ Recommended:
   - `GEMINI_API_KEY`
 
 Optional runtime tuning:
+- `MATCH_REQUEST_TYPE` (`match:request` default, or `match:test_request` for deterministic harness runs)
 - `MIN_REPLY_DELAY_MS`
 - `MAX_REPLY_DELAY_MS`
 - `MIN_GAP_BETWEEN_MESSAGES_MS`

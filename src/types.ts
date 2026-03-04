@@ -1,6 +1,7 @@
 export type Guess = "human" | "agent"
 
 export type ProviderName = "openai" | "anthropic" | "gemini"
+export type MatchRequestType = "match:request" | "match:test_request"
 
 export type ChatTurn = {
   from: "self" | "opponent"
@@ -36,6 +37,7 @@ export type BotConfig = {
   baseUrl: string
   agentToken: string
   agentName: string
+  matchRequestType: MatchRequestType
   llmProvider: ProviderName
   llmModel: string
   openaiApiKey?: string

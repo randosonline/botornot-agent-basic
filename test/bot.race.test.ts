@@ -1,15 +1,19 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import { BotOrNotAgent } from "../src/bot.js"
-import type { BotConfig } from "../src/types.js"
+import type { BotConfig, MatchRequestType } from "../src/types.js"
 
 const LOBBY_ROOM = "room:game:botornot:lobby"
 
-function buildTestConfig(agentName: string): BotConfig {
+function buildTestConfig(
+  agentName: string,
+  matchRequestType: MatchRequestType = "match:request"
+): BotConfig {
   return {
     baseUrl: "https://randosonline.com",
     agentToken: "test-token",
     agentName,
+    matchRequestType,
     llmProvider: "openai",
     llmModel: "gpt-4o-mini",
     reconnectInitialMs: 50,
@@ -164,6 +168,74 @@ test("room:sync joins compliance room and tracks it", async () => {
   assert.deepEqual(joined, [complianceRoom])
 })
 
+test("joining lobby sends configured match:test_request", () => {
+  const config = buildTestConfig("join-boot-test-bot", "match:test_request")
+  const agent = new BotOrNotAgent(config, null)
+  const sent: Array<{ room: string; type: string; payload: Record<string, unknown> }> = []
+
+  ;(agent as unknown as {
+    pushEvent: (room: string, type: string, payload: Record<string, unknown>) => boolean
+  }).pushEvent = (room: string, type: string, payload: Record<string, unknown>) => {
+    sent.push({ room, type, payload })
+    return true
+  }
+
+  ;(agent as unknown as { handleJoinAck: (room: string, id: string | null) => void }).handleJoinAck(LOBBY_ROOM, null)
+
+  assert.deepEqual(sent, [{ room: LOBBY_ROOM, type: "match:test_request", payload: {} }])
+})
+
+test("match:test_request replies route through match request handler", () => {
+  const config = buildTestConfig("test-request-routing-bot", "match:test_request")
+  const agent = new BotOrNotAgent(config, null)
+  const handled: Array<{ event: "reply" | "error"; status?: string; reason?: string }> = []
+
+  ;(agent as unknown as {
+    handleMatchRequestReply: (payload: Record<string, unknown>, eventKind: "reply" | "error") => void
+  }).handleMatchRequestReply = (payload: Record<string, unknown>, eventKind: "reply" | "error") => {
+    handled.push({
+      event: eventKind,
+      status: typeof payload.status === "string" ? payload.status : undefined,
+      reason: typeof payload.reason === "string" ? payload.reason : undefined
+    })
+  }
+
+  ;(agent as unknown as { pendingPushes: Map<string, unknown> }).pendingPushes.set("r1", {
+    room: LOBBY_ROOM,
+    event: "push",
+    messageType: "match:test_request"
+  })
+
+  ;(agent as unknown as {
+    handleReplyOrError: (
+      room: string,
+      id: string | null,
+      event: "reply" | "error",
+      payload: Record<string, unknown>
+    ) => void
+  }).handleReplyOrError(LOBBY_ROOM, "r1", "reply", { status: "queued" })
+
+  ;(agent as unknown as { pendingPushes: Map<string, unknown> }).pendingPushes.set("r2", {
+    room: LOBBY_ROOM,
+    event: "push",
+    messageType: "match:test_request"
+  })
+
+  ;(agent as unknown as {
+    handleReplyOrError: (
+      room: string,
+      id: string | null,
+      event: "reply" | "error",
+      payload: Record<string, unknown>
+    ) => void
+  }).handleReplyOrError(LOBBY_ROOM, "r2", "error", { reason: ":forbidden" })
+
+  assert.deepEqual(handled, [
+    { event: "reply", status: "queued", reason: undefined },
+    { event: "error", status: undefined, reason: ":forbidden" }
+  ])
+})
+
 test("compliance challenge echoes probe token and retries match request", async () => {
   const config = buildTestConfig("probe-echo-test-bot")
   const agent = new BotOrNotAgent(config, null)
@@ -200,6 +272,46 @@ test("compliance challenge echoes probe token and retries match request", async 
   assert.deepEqual(sent[1], {
     room: LOBBY_ROOM,
     type: "match:request",
+    payload: {}
+  })
+})
+
+test("compliance retry uses configured match:test_request", async () => {
+  const config = buildTestConfig("probe-echo-test-request-bot", "match:test_request")
+  const agent = new BotOrNotAgent(config, null)
+  const complianceRoom = "room:session:AbCd1234QwEr"
+  const probeToken = "1a2b3c4d"
+  const sent: Array<{ room: string; type: string; payload: Record<string, unknown> }> = []
+
+  ;(agent as unknown as { complianceRoom: string | null }).complianceRoom = complianceRoom
+  ;(agent as unknown as { joinedRooms: Set<string> }).joinedRooms.add(complianceRoom)
+  ;(agent as unknown as { joinedRooms: Set<string> }).joinedRooms.add(LOBBY_ROOM)
+  ;(agent as unknown as {
+    pushEvent: (room: string, type: string, payload: Record<string, unknown>) => boolean
+  }).pushEvent = (room: string, type: string, payload: Record<string, unknown>) => {
+    sent.push({ room, type, payload })
+    return true
+  }
+
+  await (agent as unknown as {
+    handleEnvelope: (
+      topic: string,
+      payload: { type: string; payload: { body: string; probe_token: string } }
+    ) => Promise<void>
+  }).handleEnvelope(complianceRoom, {
+    type: "chat:message",
+    payload: { body: "compliance check", probe_token: probeToken }
+  })
+
+  assert.equal(sent.length, 2)
+  assert.deepEqual(sent[0], {
+    room: complianceRoom,
+    type: "chat:message",
+    payload: { body: probeToken }
+  })
+  assert.deepEqual(sent[1], {
+    room: LOBBY_ROOM,
+    type: "match:test_request",
     payload: {}
   })
 })
@@ -265,4 +377,44 @@ test("duplicate probe token delivery does not resend compliance echo", async () 
 
   assert.equal(complianceEchoes.length, 1)
   assert.equal(queueRequests.length, 1)
+})
+
+test("heartbeat re-request uses configured match:test_request", () => {
+  const config = buildTestConfig("heartbeat-requeue-test-bot", "match:test_request")
+  const agent = new BotOrNotAgent(config, null)
+  const sent: Array<{ room: string; type: string; payload: Record<string, unknown> }> = []
+  let heartbeatTick: (() => void) | null = null
+
+  ;(agent as unknown as { joinedRooms: Set<string> }).joinedRooms.add(LOBBY_ROOM)
+  ;(agent as unknown as { awaitingMatch: boolean }).awaitingMatch = false
+  ;(agent as unknown as { lastMatchRequestAt: number }).lastMatchRequestAt = 0
+  ;(agent as unknown as {
+    pushEvent: (room: string, type: string, payload: Record<string, unknown>) => boolean
+  }).pushEvent = (room: string, type: string, payload: Record<string, unknown>) => {
+    sent.push({ room, type, payload })
+    return true
+  }
+
+  const originalSetInterval = global.setInterval
+  const originalClearInterval = global.clearInterval
+
+  ;(global as unknown as { setInterval: typeof setInterval }).setInterval = ((fn: () => void) => {
+    heartbeatTick = fn
+    return 123 as unknown as NodeJS.Timeout
+  }) as typeof setInterval
+  ;(global as unknown as { clearInterval: typeof clearInterval }).clearInterval = (() => {
+    return undefined
+  }) as typeof clearInterval
+
+  try {
+    ;(agent as unknown as { startHeartbeat: () => void }).startHeartbeat()
+    assert.ok(heartbeatTick, "expected heartbeat callback to be registered")
+    heartbeatTick?.()
+  } finally {
+    ;(global as unknown as { setInterval: typeof setInterval }).setInterval = originalSetInterval
+    ;(global as unknown as { clearInterval: typeof clearInterval }).clearInterval = originalClearInterval
+    ;(agent as unknown as { stopHeartbeat: () => void }).stopHeartbeat()
+  }
+
+  assert.equal(sent.some(entry => entry.type === "match:test_request"), true)
 })
